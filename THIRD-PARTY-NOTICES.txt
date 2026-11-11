@@ -1,0 +1,47 @@
+ThermalDesk — GPL-3.0-or-later
+
+Copyright (c) 2026 ThermalDesk contributors.
+This program is free software under the GNU General Public License version 3
+or, at your option, any later version. It comes WITHOUT ANY WARRANTY,
+including implied MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See LICENSE for the complete terms. Corresponding source is provided with this release.
+
+Protocol references / adaptations:
+
+1. Kraken LCD Studio — https://github.com/krakenunbound/kraken-lcd-studio
+   GPL-3.0-or-later; see licenses/Kraken-LCD-Studio.txt.
+   264A:233D handshake and JPEG report layout informed the independent C# implementation.
+   Original Thermaltake LCD protocol work: bekindpleaserewind/ttlcd (GPL-3.0).
+   https://github.com/bekindpleaserewind/ttlcd
+
+2. OpenAIO Panel — Copyright (c) 2026 DailyDana — MIT.
+   https://github.com/DailyDana/openaio-panel
+   Reference commit: 57b7f8f85974bd2596c5229f4e7afee37b242b31
+   AX firmware/size gates and 264A:2328 feature/JPEG protocol adapted to C#.
+   Full MIT notice: licenses/OpenAIO-Panel.txt.
+   No upstream prebuilt DLLs or installer are redistributed.
+
+3. OpenRGB — GPL-2.0-or-later; Thermaltake Riing Quad controller by
+   Chris M (Dr_No), 2021. https://github.com/CalcProgrammer1/OpenRGB
+   RGB report layout, GRB ordering, direct-mode opcode and keepalive behavior.
+   The C# implementation is distributed under the compatible GPL-3.0-or-later.
+
+4. FanControl Thermaltake plugin — AMoo-Miki/fu-raz contributors, GPL.
+   https://github.com/AMoo-Miki/FanControlThermaltake
+   Fan command and response protocol reference. No upstream binary is bundled.
+
+Runtime dependencies (original license terms still apply):
+- HidSharp 2.6.4, James F. Bellinger and contributors, Apache-2.0.
+- LibreHardwareMonitorLib 0.9.6, LibreHardwareMonitor/OpenHardwareMonitor
+  contributors, MPL-2.0 and third-party notices.
+- Transitive NuGet dependencies: exact versions in packages.lock.json.
+- Self-contained portable builds include Microsoft .NET runtime components
+  under their original licenses (see licenses/Microsoft-NET-* files).
+
+Official sources:
+https://github.com/LibreHardwareMonitor/LibreHardwareMonitor
+https://www.nuget.org/packages/LibreHardwareMonitorLib/0.9.6
+https://www.nuget.org/packages/HidSharp/2.6.4
+
+No Thermaltake proprietary binary, credential, private profile or firmware is
+included. Product and vendor names identify compatibility, not endorsement.

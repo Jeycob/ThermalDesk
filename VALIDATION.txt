@@ -1,0 +1,72 @@
+ThermalDesk 0.1.0 — validation record — 2026-11-11
+
+BUILD
+- Windows x64, private Microsoft .NET SDK 10.0.404.
+- SDK archive verified against Microsoft's SHA-512 release metadata.
+- Portable self-contained runtime: .NET 10.0.15.
+- Release build: succeeded, zero compiler warnings/errors.
+- 93 hardware-independent assertions: passed.
+- Native WinForms UI rendered and visually inspected; both simulated LCD previews rendered.
+
+PREVIEW PERFORMANCE (NOT LIVE HARDWARE PERFORMANCE)
+- 35-second local simulated-UI run; samples from 5 to 35 seconds.
+- 16 logical processors on the build/test PC, not the target Ryzen PC.
+- Mean total CPU: approximately 0.20%.
+- Working set: approximately 68–77 MiB.
+- Threads: 14–17.
+- GDI objects: 38 at all measured samples; USER objects: 54 at all samples.
+- Handles: 360–364 (small runtime initialization change; not a long-duration leak test).
+- No CPU sensor driver or HID device was opened during this benchmark.
+- Real sensor polling, USB frame throughput, and cooling overhead remain unmeasured.
+
+TARGET-PC READ-ONLY CHECK
+- Portable EXE successfully ran --diagnose and exited with code 0.
+- 264A:232B: input 65 bytes, output 193 bytes.
+- 264A:2328: input 512 bytes, output 1024 bytes, feature 64 bytes.
+- TT RGB Plus and LibHWInfo remained running and were not stopped or modified.
+- 264A:233D was not returned by HidSharp during this check. Earlier Windows PnP
+  inventory showed its MI_00/MI_01 interfaces. Exclusive access by TT software
+  may hide it from this enumeration; disconnect versus busy has not been resolved.
+- Diagnostic mode sent no HID commands, did not initialize sensor monitoring,
+  did not install drivers, and did not change startup settings.
+
+NOT YET VERIFIED ON PHYSICAL HARDWARE
+- Actual panel/AIO frame display, brightness, image rotation and firmware variant.
+- Actual RGB colors and LED counts on the user's controller.
+- Physical fan/pump wiring, RPM feedback and safe minimum speeds.
+- USB loss, sleep/resume, cold boot and controller firmware fail-safe behavior.
+- Real sensor availability and long-duration resource use on the target PC.
+- No unattended cooling certification or crash-proof protection is claimed.
+
+FOLLOW-UP ACCEPTANCE — 2026-11-11
+- Native preview launched on the target interactive desktop and was confirmed visible.
+- Five fan status replies decoded successfully: 425, 470, 460, 454, 462 RPM,
+  each reporting 30% duty. Status queries/initialization only; no duty or RGB writes.
+- AX firmware feature reply matched 1.0.5.4.
+- Five LCD frames were sent without transport errors, but the operator reported no
+  visible image (unchanged or black). Physical LCD acceptance therefore FAILED.
+- The short test closed its heartbeat before the confirmation question; a 60-second
+  observation test has been added to exclude that timing ambiguity. This is not a
+  confirmed diagnosis or a claim that the longer test will pass.
+- CPU readings exposed a zero sentinel; PawnIO service is not installed. Monitoring
+  now rejects this value and reports the CPU temperature as unavailable.
+- Original TT RGB Plus was restarted after the unsuccessful display check.
+- No fan speed, RGB value, firmware, BIOS setting or existing TT profile was changed
+  by these acceptance checks. The LCD brightness/configuration was exercised.
+
+REPEATED PHYSICAL LCD TEST — PASSED
+- A 60-second test sent 60 dashboard frames with continuous heartbeat; an initial
+  status poll was also added to match the reference loop ordering.
+- The operator explicitly confirmed a visible dashboard with a changing clock.
+- The earlier five-second failure was therefore not sufficient to diagnose the
+  transport. Test duration and status-poll ordering both changed; causality is unknown.
+- Labels/clock have subsequently been enlarged at the operator's request. This
+  purely visual change is built but not physically size-confirmed yet.
+- CPU sensor support, physical speed changes, RGB colors and unattended cooling
+  remain unverified. Do not mistake a successful LCD test for complete replacement.
+
+RELEASE LIMIT
+This is a substantial experimental implementation for the identified devices,
+not a verified universal or feature-for-feature replacement for all TT RGB Plus
+products. Keep the existing proven cooling setup until controlled hardware
+acceptance tests have passed. Do not delete TT RGB Plus yet.

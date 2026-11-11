@@ -1,0 +1,14 @@
+.packages/
+.dotnet/
+**/bin/
+**/obj/
+dist/
+artifacts/
+*.user
+*.suo
+*.tmp
+*.log
+settings.json
+*private*key*
+id_rsa*
+id_ed25519*
