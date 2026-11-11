@@ -56,6 +56,12 @@ internal static class WidgetChecks
             Check(!StartupManager.ShouldStartLive(startup, ["--startup"], true), "Shift must bypass live startup.");
             startup.StartLiveAtSignIn = false;
             Check(!StartupManager.ShouldStartLive(startup, ["--startup"], false), "Unarmed profile cannot auto-start hardware.");
+            Check(StartupManager.ShouldStartLive(startup, ["--live-once"], false), "Explicit one-time live launch does not arm sign-in startup.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--live-once"], true), "Shift bypass also protects the explicit one-time launcher.");
+            bool emptyBlocked = false;
+            try { new Engine(_ => throw new Exception("No device should open"), () => t, () => []).Start(new Settings(), true); }
+            catch (ArgumentException) { emptyBlocked = true; }
+            Check(emptyBlocked, "Empty live selection must be rejected before opening a device.");
             using var process = Process.GetCurrentProcess();
             using var repeated = new FrameRenderer();
             using (var warmup = repeated.Render(t, restored.Aio, 480, 480)) { }

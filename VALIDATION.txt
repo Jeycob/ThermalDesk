@@ -1,4 +1,4 @@
-ThermalDesk 0.3.0 — validation record — 2026-11-11
+ThermalDesk 0.3.1 — validation record — 2026-11-11
 
 BUILD
 - Windows x64, private Microsoft .NET SDK 10.0.404.
@@ -109,3 +109,17 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   Shift bypass and unarmed startup. These do not register tasks or write hardware.
 - New physical RGB, panel, sign-in, thermal soak and all-port tests are pending.
 - No changes to existing TT startup or BIOS pump control are part of these tests.
+
+0.3.1 LIVE-START CLARITY AND CPU ACCESS
+- Target read-only elevated sensor check passed: CPU about 66 C, PawnIO running;
+  no USB device or fan-speed write was used. The prior limited preview could not
+  access this restricted driver; missing CPU data was not a missing driver.
+- Empty live selections now fail with a clear instruction to enable a device.
+- Administrator/limited status is visible. Restart as admin stops the session
+  first and opens Preview after elevation; it does not silently arm cooling.
+- An explicit --live-once switch permits an approved one-time hardware launch
+  without creating sign-in startup. Shift bypasses it. Cooling requires elevation.
+- Optional --status-output writes local acceptance telemetry every 5 seconds;
+  off by default. It does not open a network listener or contain credentials.
+- Automated core count: 743. App checks include empty-selection and launch-policy
+  cases. New physical LCD/RGB/fan-session acceptance is tracked separately.

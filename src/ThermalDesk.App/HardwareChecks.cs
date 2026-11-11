@@ -13,7 +13,7 @@ internal static class HardwareChecks
         {
             ["time"] = DateTimeOffset.UtcNow, ["mode"] = mode,
             ["administrator"] = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator),
-            ["fanSpeedWrites"] = false, ["driverInstalled"] = false
+            ["fanSpeedWrites"] = false, ["driverInstalledByThisCheck"] = false
         };
         int exit = 0;
         try

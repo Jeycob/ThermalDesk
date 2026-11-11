@@ -18,6 +18,13 @@ For actual hardware:
 
 No existing TT installation, startup task, driver, or profile is automatically changed. **Stop** releases devices. To return to TT RGB Plus, stop/exit ThermalDesk first, then start TT RGB Plus.
 
+Both LCDs are disabled in a fresh profile. **Start live control** now rejects an
+empty selection instead of silently running sensors with no display. The lower
+status bar shows **Limited user** or **Administrator**. On this PC, use
+**Restart as admin** to read CPU sensors through the official PawnIO driver.
+This stops the current session, requests Windows elevation and reopens Preview;
+confirm live control again afterward. It does not install a driver or change BIOS.
+
 ## Device support
 
 | USB ID | Implementation | Validation status |
@@ -118,8 +125,18 @@ Settings: `%LOCALAPPDATA%\ThermalDesk\settings.json`. Save/import changes apply 
 
 Hold **Shift** during launch to bypass automatic live control. A running TT/OpenRGB/FanControl/SignalRGB blocks live startup; it is not killed. No existing vendor startup setting is changed. Test devices first, then disable vendor startup yourself if you choose to switch. This runs **after Windows sign-in**, not before login or as a cooling service. BIOS/firmware protection must remain independent.
 
+For an explicitly approved one-time launch, `ThermalDesk.exe --live-once` opens
+the saved enabled devices without registering startup. This is real hardware
+access, not a test flag. It still validates the profile, administrator access for
+cooling, device descriptors, conflicts and sensor fail-safe policy. Shift bypasses it.
+
 The automatic-live launch policy has automated tests; an actual sign-in and physical
 hardware handover still require operator acceptance. It is not enabled by default.
+
+An attended diagnostic launch may add `--status-output C:\path\live-status.json`.
+This opt-in local file contains sensor readings, controller feedback and recent
+status messages every five seconds. No server is opened; omit the switch for
+ordinary use. A successful status report is not physical LCD/color confirmation.
 
 No network port is opened. Diagnostics are saved only when requested and can contain local HID paths and logs. Screen mirroring can expose desktop content on the physical LCD; it is opt-in. Existing credentials are neither read nor embedded.
 

@@ -42,11 +42,16 @@ internal sealed class Engine
     {
         if (Running) throw new InvalidOperationException("Stop the current session first.");
         settings.Validate();
+        if (live) settings.ValidateLiveSelection();
+        if (live && settings.CoolingEnabled && testTelemetry is null && !StartupManager.Elevated)
+            throw new InvalidOperationException("CPU sensor access on this PC requires administrator rights. Restart as administrator before enabling cooling.");
         if (live && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
         var s = settings.Copy(); stop = new(); var token = stop.Token; Live = live; conflictingController = false;
         Status.Clear(); Fans.Clear();
         latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
         Status["Session"] = live ? "LIVE · configured devices only" : "PREVIEW · no hardware access";
+        Status["TOUGHLIQUID AX"] = s.Aio.Enabled ? "Enabled · waiting for connection" : "Disabled · enable in Displays";
+        Status["480×128 panel"] = s.Panel.Enabled ? "Enabled · waiting for connection" : "Disabled · enable in Displays";
         Note(live ? "Live session started. No flash writes or firmware updates." : "Preview started. All values are simulated.");
         var workers = new List<Task> { Task.Run(() => SensorLoop(s.PollSeconds, live, token)) };
         if (live)

@@ -30,6 +30,9 @@ internal sealed class MainForm : Form
     private DateTime lastResource = DateTime.UtcNow;
     private readonly DateTime resourceWarmup = DateTime.UtcNow.AddSeconds(5);
     private TimeSpan lastCpu;
+    private DateTime nextStatusWrite;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string? AcceptanceStatusPath { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool StartMinimized { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -53,6 +56,7 @@ internal sealed class MainForm : Form
         tools.Controls.Add(Button("Save profile", () => { settings = ReadSettings(); SettingsStore.Save(configPath, settings); Info("Profile saved. Changes apply when the session is restarted."); }));
         tools.Controls.Add(Button("Import / export", ProfileMenu));
         tools.Controls.Add(Button("Start at sign-in", ConfigureStartup));
+        if (!StartupManager.Elevated) tools.Controls.Add(Button("Restart as admin", async () => await RestartElevated()));
         shell.Controls.Add(tools, 0, 1);
         session.AutoSize = true; session.ForeColor = Muted; shell.Controls.Add(session, 0, 2);
         var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(18, 8) };
@@ -94,17 +98,17 @@ internal sealed class MainForm : Form
         var logsPage = Page(tabs, "Log + diagnostics"); ConfigureText(log); logsPage.Controls.Add(log);
         var diag = Button("Export diagnostics", ExportDiagnostics); diag.Dock = DockStyle.Bottom; logsPage.Controls.Add(diag); diag.BringToFront();
         var about = Page(tabs, "About");
-        var aboutText = new TextBox(); ConfigureText(aboutText); aboutText.Text = "ThermalDesk 0.3.0 — independent, experimental Windows controller\r\n\r\nTargets only the devices identified in this PC: 264A:233D, 264A:2328 (AX firmware), and 264A:232B.\r\n\r\nNo TT process is stopped automatically. No driver protection is disabled. No firmware or flash is modified.\r\n\r\nTelemetry: LibreHardwareMonitor 0.9.6, CPU/GPU/memory only. Some CPU sensors require administrator access and a supported PawnIO setup. Missing CPU temperatures block normal fan curves and request 100% duty.\r\n\r\nDefault/manual launch: simulated preview; all writes disabled. Automatic live startup requires a saved armed profile AND the registered --startup launch. Hold Shift to bypass it. A conflicting vendor app blocks live access. This is not a before-login cooling service.\r\n\r\nDuty % is a controller request, not watts or RPM. PWM/DC electrical switching is not exposed by the verified protocol. BIOS pump control is unchanged.\r\n\r\nLCD and fan protocols must be validated on your particular hardware. A successful build or test is not a hardware safety certification.\r\n\r\nNo PSU, RAM RGB, cloud sync, firmware updates, or vendor mini-games.\r\n\r\nGPL-3.0-or-later. See LICENSE and THIRD-PARTY-NOTICES.txt for original authors and dependencies."; about.Controls.Add(aboutText);
+        var aboutText = new TextBox(); ConfigureText(aboutText); aboutText.Text = $"ThermalDesk {typeof(MainForm).Assembly.GetName().Version?.ToString(3)} — independent experimental controller\r\n\r\nDevices: 264A:233D panel, 264A:2328 AX LCD, 264A:232B five-port fan controller. Unknown descriptors/firmware are rejected.\r\n\r\nNormal launch: Preview, no hardware access. Enable the correct device under Displays before Start live control. CPU sensors on this PC require administrator access and the supported PawnIO installation.\r\n\r\nSaved automatic-live startup is opt-in. Shift bypasses it. Conflicting vendor apps block live access and are never killed. This is not a before-login cooling service.\r\n\r\nDuty % is a controller request, not watts or RPM. PWM/DC electrical switching is not exposed by the verified protocol. BIOS pump control remains unchanged.\r\n\r\nA crash, USB loss or frozen process cannot be made safe by an exit handler. Keep independent firmware/BIOS thermal protection. No driver protection, firmware or flash is modified.\r\n\r\nPhysical acceptance is required for LCD images, RGB colors, wiring and cooling. Automated tests are not certification.\r\n\r\nNo PSU/RAM RGB/cloud/firmware updates. No network server. GPL-3.0-or-later; see LICENSE and THIRD-PARTY-NOTICES.txt."; about.Controls.Add(aboutText);
         var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill }; bottom.Controls.Add(new Label { Text = "Sensor interval (s)", AutoSize = true }); poll.Value = initial.PollSeconds; bottom.Controls.Add(poll); resources.AutoSize = true; resources.ForeColor = Muted; bottom.Controls.Add(resources); shell.Controls.Add(bottom, 0, 4);
         cooling.Checked = initial.CoolingEnabled; wiring.Checked = initial.CoolingWiringConfirmed; rgb.Checked = initial.RgbEnabled; monitorFans.Checked = initial.MonitorFanController; color.Text = initial.RgbColor; serial.Text = initial.ControllerSerial;
         tray.ContextMenuStrip = new ContextMenuStrip(); tray.ContextMenuStrip.Items.Add("Open", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
         tray.ContextMenuStrip.Items.Add("Stop hardware control", null, async (_, _) => await Run(async () => await engine.Stop()));
         tray.ContextMenuStrip.Items.Add("Exit", null, (_, _) => { exiting = true; Close(); }); tray.DoubleClick += (_, _) => { Show(); Activate(); };
-        refresh.Tick += (_, _) => { if (Visible && !busy) RefreshData(); };
+        refresh.Tick += (_, _) => { if (Visible && !busy) RefreshData(); WriteAcceptanceStatus(); };
         Shown += (_, _) =>
         {
             if (smokeMode) return;
-            try { engine.Start(settings, StartupRequested && settings.StartLiveAtSignIn); refresh.Start(); tray.Visible = true; if (StartMinimized) Hide(); }
+            try { engine.Start(settings, StartupRequested); refresh.Start(); tray.Visible = true; if (StartMinimized) Hide(); }
             catch (Exception error) { refresh.Start(); tray.Visible = true; Show(); Error(new InvalidOperationException("Startup was blocked safely. No conflicting app was stopped. " + error.Message)); }
         };
         Resize += (_, _) => { if (WindowState == FormWindowState.Minimized && tray.Visible) Hide(); };
@@ -183,6 +187,9 @@ internal sealed class MainForm : Form
         var next = ReadSettings();
         if (live)
         {
+            next.ValidateLiveSelection();
+            if (next.CoolingEnabled && !StartupManager.Elevated)
+                throw new InvalidOperationException("CPU sensor access on this PC requires administrator rights. Click Restart as admin first. No cooling session was started.");
             string warning = "Start live control of the enabled devices? Close TT RGB Plus, OpenRGB, Fan Control and SignalRGB first. No application will be closed automatically.";
             if (next.CoolingEnabled) warning += "\n\nCooling: you must have verified wiring and independent thermal protection. USB disconnection or a crashed/frozen process cannot guarantee a safe fan speed. Do not use experimental cooling unattended.";
             if (next.Panel.Content == DisplayContent.Screen || next.Aio.Content == DisplayContent.Screen) warning += "\n\nScreen mirroring can display private information on the physical LCD.";
@@ -195,6 +202,7 @@ internal sealed class MainForm : Form
         var t = engine.Latest;
         static string Temp(double? x) => x.HasValue ? $"{x:0.0} °C" : "Unavailable";
         cpu.Text = $"CPU\n{Temp(t.CpuTemperature)}   ·   {t.CpuLoad:0}% load";
+        if (engine.Live && !t.CpuTemperature.HasValue && !StartupManager.Elevated) cpu.Text = "CPU\nUnavailable · restart as admin";
         gpu.Text = $"GPU\n{Temp(t.GpuTemperature)}   ·   {t.GpuLoad:0}% load";
         memory.Text = $"MEMORY\n{t.MemoryUsedPercent:0}% used";
         session.Text = engine.Cancelled ? "SESSION CANCELLED · see log · press Stop before reconnecting" : engine.Running ? (engine.Live ? "LIVE · hardware session" : "PREVIEW · simulated data · hardware writes disabled") : "STOPPED";
@@ -206,10 +214,29 @@ internal sealed class MainForm : Form
         using var p = Process.GetCurrentProcess();
         var now = DateTime.UtcNow; double elapsed = (now - lastResource).TotalSeconds;
         double percent = elapsed > 0 ? (p.TotalProcessorTime - lastCpu).TotalSeconds / elapsed / Environment.ProcessorCount * 100 : 0;
-        resources.Text = $"    App: {(now < resourceWarmup ? "warming up" : $"{percent:0.00}% CPU")} · {p.WorkingSet64 / 1048576d:0} MiB · {p.Threads.Count} threads · {p.HandleCount} handles";
+        resources.Text = $"    {(StartupManager.Elevated ? "Administrator" : "Limited user")} · App: {(now < resourceWarmup ? "warming up" : $"{percent:0.00}% CPU")} · {p.WorkingSet64 / 1048576d:0} MiB · {p.Threads.Count} threads · {p.HandleCount} handles";
         lastCpu = p.TotalProcessorTime; lastResource = now;
     }
     private void PickColor() { using var d = new ColorDialog(); if (d.ShowDialog() == DialogResult.OK) color.Text = $"{d.Color.R:X2}{d.Color.G:X2}{d.Color.B:X2}"; }
+    private void WriteAcceptanceStatus()
+    {
+        if (AcceptanceStatusPath is null || DateTime.UtcNow < nextStatusWrite) return;
+        nextStatusWrite = DateTime.UtcNow.AddSeconds(5);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(AcceptanceStatusPath)!);
+            File.WriteAllText(AcceptanceStatusPath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.Running, engine.Live, engine.Cancelled, administrator = StartupManager.Elevated, telemetry = engine.Latest, fans = engine.Fans.Values.OrderBy(x => x.Port), status = engine.Status, log = engine.Logs.TakeLast(12) }, Settings.JsonOptions));
+        }
+        catch (Exception error) { session.Text = "Acceptance status output failed: " + error.Message; }
+    }
+    private async Task RestartElevated() => await Run(async () =>
+    {
+        if (MessageBox.Show("Restart with administrator rights for CPU sensor access?\n\nThe current hardware session will stop first. The new window opens in Preview; confirm live control again. Windows may show a UAC prompt.", "Restart ThermalDesk", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        var next = ReadSettings(); SettingsStore.Save(configPath, next); await engine.Stop();
+        var launch = new ProcessStartInfo(Application.ExecutablePath) { UseShellExecute = true, Verb = "runas", Arguments = $"--wait-for-process {Environment.ProcessId}" };
+        using var child = Process.Start(launch) ?? throw new IOException("Elevated restart did not launch.");
+        settings = next; exiting = true; BeginInvoke((Action)Close);
+    });
     private void ProfileMenu()
     {
         var menu = new ContextMenuStrip();

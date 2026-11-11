@@ -102,6 +102,12 @@ public sealed class Settings
             throw new ArgumentException("Select and validate at least one live device before enabling live sign-in startup.");
     }
     public Settings Copy() => JsonSerializer.Deserialize<Settings>(JsonSerializer.Serialize(this, JsonOptions), JsonOptions)!;
+    public void ValidateLiveSelection()
+    {
+        Validate();
+        if (!Panel.Enabled && !Aio.Enabled && !CoolingEnabled && !RgbEnabled && !MonitorFanController)
+            throw new ArgumentException("No live device is selected. Open Displays and enable the correct LCD, or select controller monitoring / RGB / verified cooling ports. Preview alone never opens hardware.");
+    }
     public static JsonSerializerOptions JsonOptions => new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 }
 

@@ -10,7 +10,21 @@ internal static class StartupManager
     private const string TaskName = "ThermalDesk-AtSignIn";
     private static readonly string TaskTool = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "schtasks.exe");
     internal static bool ShouldStartLive(Settings settings, string[] arguments, bool shiftHeld) =>
-        settings.StartLiveAtSignIn && arguments.Contains("--startup") && !shiftHeld;
+        !shiftHeld && (arguments.Contains("--live-once") || settings.StartLiveAtSignIn && arguments.Contains("--startup"));
+    internal static void WaitForPrevious(string[] arguments)
+    {
+        int index = Array.IndexOf(arguments, "--wait-for-process");
+        if (index < 0) return;
+        if (index + 1 >= arguments.Length || !int.TryParse(arguments[index + 1], out int id) || id <= 0 || id == Environment.ProcessId)
+            throw new ArgumentException("Invalid restart process ID.");
+        Process previous;
+        try { previous = Process.GetProcessById(id); } catch (ArgumentException) { return; }
+        using (previous)
+        {
+            if (!previous.ProcessName.Equals("ThermalDesk", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Restart target is not ThermalDesk.");
+            if (!previous.WaitForExit(20000)) throw new TimeoutException("Previous ThermalDesk is still shutting down. Do not start a second controller.");
+        }
+    }
     public static bool Elevated
     {
         get { using var user = WindowsIdentity.GetCurrent(); return new WindowsPrincipal(user).IsInRole(WindowsBuiltInRole.Administrator); }

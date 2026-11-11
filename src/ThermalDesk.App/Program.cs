@@ -9,6 +9,8 @@ internal static class Program
     private static int Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        try { StartupManager.WaitForPrevious(args); }
+        catch (Exception error) { MessageBox.Show(error.Message, "ThermalDesk restart blocked"); return 1; }
         if (args.Length == 2 && args[0] == "--widget-check") return WidgetChecks.Run(Path.GetFullPath(args[1]));
         string[] checks = ["--sensor-check", "--fan-status-check", "--fan-curve-acceptance", "--aio-firmware-check", "--aio-display-check", "--panel-display-check"];
         if (args.Length == 2 && checks.Contains(args[0])) return HardwareChecks.Run(args[0], args[1]);
@@ -25,6 +27,12 @@ internal static class Program
             // Preview never reads saved live configuration or opens hardware.
             var config = args.Contains("--render-preview") || args.Contains("--benchmark-preview") ? new Settings() : SettingsStore.Load(path);
             using var form = new MainForm(config, path);
+            int status = Array.IndexOf(args, "--status-output");
+            if (status >= 0)
+            {
+                if (status + 1 >= args.Length) throw new ArgumentException("Specify an acceptance status JSON path.");
+                form.AcceptanceStatusPath = Path.GetFullPath(args[status + 1]);
+            }
             int benchmark = Array.IndexOf(args, "--benchmark-preview");
             if (benchmark >= 0)
             {

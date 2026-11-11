@@ -35,6 +35,8 @@ safety.Reset(); var initial = safety.Evaluate(port, Tele(60), now, 2).Duty;
 Check(safety.Evaluate(port, Tele(59), now, 2).Duty == initial, "2 degree downward hysteresis");
 Check(safety.Evaluate(port, Tele(50), now, 2).Duty < initial, "hysteresis release");
 var settings = new Settings(); settings.Validate(); Check(!settings.CoolingEnabled && !settings.Panel.Enabled && !settings.Aio.Enabled, "all writes default off");
+Throws(settings.ValidateLiveSelection, "empty live session rejected");
+settings.Aio.Enabled = true; settings.ValidateLiveSelection(); Check(true, "explicit LCD is a valid live selection"); settings.Aio.Enabled = false;
 settings.CoolingEnabled = true; Throws(settings.Validate, "arming requires wiring and configured port");
 settings.CoolingWiringConfirmed = true; settings.Ports[0].Mode = ControlMode.Curve; Throws(settings.Validate, "unknown port role rejected");
 settings.Ports[0].Role = PortRole.Fan; settings.Validate(); Check(true, "valid armed profile");
