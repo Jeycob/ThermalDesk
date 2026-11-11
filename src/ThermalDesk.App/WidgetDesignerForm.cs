@@ -208,7 +208,22 @@ internal sealed class DesignerCanvas : Control
 internal sealed class WidgetProperties(LcdWidget widget)
 {
     [Category("1 · Content")] public string Name { get => widget.Name; set => widget.Name = value; }
-    [Category("1 · Content"), Description("Choose a sensor, static text, date, clock or a fan reading.")] public WidgetSource Source { get => widget.Source; set { widget.Source = value; widget.ValueFormat = value switch { WidgetSource.Clock => "HH:mm:ss", WidgetSource.Date => "yyyy-MM-dd", _ => "0.0" }; } }
+    [Category("1 · Content"), Description("Choose a sensor. Source changes set a matching default unit/label; customize Text afterward.")]
+    public WidgetSource Source
+    {
+        get => widget.Source;
+        set
+        {
+            widget.Source = value; widget.ValueFormat = value switch { WidgetSource.Clock => "HH:mm:ss", WidgetSource.Date => "yyyy-MM-dd", WidgetSource.FanRpm or WidgetSource.FanDuty or WidgetSource.CpuLoad or WidgetSource.GpuLoad or WidgetSource.MemoryUsedPercent => "0", _ => "0.0" };
+            widget.TextTemplate = value switch
+            {
+                WidgetSource.CpuTemperature => "CPU {value} °C", WidgetSource.GpuTemperature => "GPU {value} °C",
+                WidgetSource.GpuHotSpotTemperature => "GPU HOTSPOT {value} °C", WidgetSource.GpuMemoryTemperature => "GPU MEMORY {value} °C",
+                WidgetSource.CpuLoad => "CPU {value}%", WidgetSource.GpuLoad => "GPU {value}%", WidgetSource.MemoryUsedPercent => "RAM {value}%",
+                WidgetSource.FanRpm => "FAN {value} RPM", WidgetSource.FanDuty => "FAN {value}%", WidgetSource.Clock or WidgetSource.Date => "{value}", _ => widget.TextTemplate
+            };
+        }
+    }
     [Category("1 · Content"), Description("Literal text with {value} substituted from the selected source. Text source is entirely literal.")] public string Text { get => widget.TextTemplate; set => widget.TextTemplate = value; }
     [Category("1 · Content"), Description("Numeric: 0 or 0.0. Clock: HH:mm:ss. Date: yyyy-MM-dd. No code is evaluated.")] public string ValueFormat { get => widget.ValueFormat; set => widget.ValueFormat = value; }
     [Category("1 · Content"), Description("Controller port 1–5, used only for FanRpm/FanDuty.")] public int FanPort { get => widget.Port; set => widget.Port = value; }
