@@ -53,9 +53,9 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 - Two independent LCDs: telemetry dashboard, image/GIF, or primary-screen mirroring; rotation, brightness, overlays, 1–10 FPS.
 - Native per-LCD widget editor: drag/resize, numeric bounds, font picker, size, bold, custom text, colors, alignment and sensor bindings.
 - Image/GIF fitting preserves aspect ratio. GIF frames are sampled at the configured refresh rate; no video decoder runs in the background.
-- Per-port Preserve / Fixed / Curve cooling, fan/pump roles, minimum speeds, sensor selection, RPM feedback.
-- Per-port static RGB with a selectable color and LED count. A bounded keepalive maintains direct lighting.
-- JSON profiles, bounded in-memory log, diagnostics export, tray operation, optional preview-only sign-in startup.
+- Per-port Preserve / Fixed / Curve cooling, draggable curve points, fan/pump roles, minimum speeds, CPU/GPU sensor selection and optional read-only RPM feedback.
+- Per-port Static, Breathing, Blink, ColorCycle, RainbowWave and Temperature RGB effects. Color, brightness, LED count and period are editable. Animations are capped at 5 FPS; thermal decisions run first.
+- JSON profiles, bounded in-memory log, diagnostics export, tray operation and opt-in preview or elevated saved-live sign-in startup.
 - Latest-snapshot telemetry and separate device loops: a stalled display does not block fan control. No thread per sensor, fan, or LED.
 
 ## Cooling rules — read before enabling
@@ -78,6 +78,19 @@ Some CPU sensors require administrator rights and a supported LibreHardwareMonit
 
 ## Profiles and privacy
 
+### Configure fans and lighting
+
+1. Open **Cooling + RGB → Edit…** on the correct physical port.
+2. Leave **Preserve** to keep speed commands off. For a verified fan, select **Fixed** or **Curve**, its temperature source and minimum duty. Drag curve points or edit the numeric table. Apply and save the profile.
+3. For lighting, enable that port's RGB, choose its physical LED count, effect, brightness and period. Blank per-port color inherits the main window color. A 1-second minimum period prevents rapid strobing; blink remains opt-in.
+4. Enable the appropriate main **Cooling** / **RGB** checkbox. Restart and confirm the live session to apply. Editing a curve never silently commands a fan.
+5. **Monitor controller RPM** polls all five ports without speed writes; it still opens and queries the USB controller. Do not run it alongside TT.
+
+Duty **%** is the requested controller output, not watts, RPM or a confirmed
+electrical PWM/DC selector. The known protocol does not expose safe PWM/DC mode
+switching. No such switch is guessed. The BIOS-controlled pump remains unchanged.
+RGB patterns have automated packet tests, not yet a physical color/LED-count check.
+
 ### Customize the LCDs
 
 1. Open **Displays → Edit widgets…** under the correct device.
@@ -95,9 +108,18 @@ to its box. Cancel leaves input settings unchanged; Defaults resets only that LC
 
 ### Saved settings
 
-Settings: `%LOCALAPPDATA%\ThermalDesk\settings.json`. Save/import changes are applied on the next session start. A saved profile **never auto-starts live control**.
+Settings: `%LOCALAPPDATA%\ThermalDesk\settings.json`. Save/import changes apply on the next session start. Manual launches always start in preview. Importing a profile clears its automatic-live flag.
 
-**Start at sign-in** toggles one current-user startup entry. It opens the app in the tray in preview mode, does not run before login and is not a background cooling service.
+**Start at sign-in** offers:
+
+- **Preview:** current-user Run entry; minimized preview, no hardware access.
+- **Saved LIVE profile:** explicit confirmation, an armed saved profile and an elevated interactive scheduled task named `ThermalDesk-AtSignIn`. Run the app as administrator once to register it. No password is stored. Only the saved enabled devices are opened.
+- **Remove:** deletes only ThermalDesk's own entry/task.
+
+Hold **Shift** during launch to bypass automatic live control. A running TT/OpenRGB/FanControl/SignalRGB blocks live startup; it is not killed. No existing vendor startup setting is changed. Test devices first, then disable vendor startup yourself if you choose to switch. This runs **after Windows sign-in**, not before login or as a cooling service. BIOS/firmware protection must remain independent.
+
+The automatic-live launch policy has automated tests; an actual sign-in and physical
+hardware handover still require operator acceptance. It is not enabled by default.
 
 No network port is opened. Diagnostics are saved only when requested and can contain local HID paths and logs. Screen mirroring can expose desktop content on the physical LCD; it is opt-in. Existing credentials are neither read nor embedded.
 

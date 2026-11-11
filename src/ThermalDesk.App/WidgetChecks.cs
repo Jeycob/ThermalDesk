@@ -37,6 +37,25 @@ internal static class WidgetChecks
             using (var form = new WidgetDesignerForm("3.9-inch LCD · 480 × 128", restored.Panel, 480, 128, () => t))
             { form.RenderForTest(Path.Combine(directory, "designer-wide.png")); Check(form.Result.Widgets.Count == 5, "Wide designer must keep widgets."); count += form.ExerciseForTest(); }
             using (var form = new MainForm(restored, path)) form.RenderPreview(Path.Combine(directory, "main-widgets.png"));
+            using (var form = new PortEditorForm(new PortSettings { Port = 1 })) count += form.ExerciseForTest(Path.Combine(directory, "port-editor.png"));
+            var fake = new TestController();
+            var rgbSettings = new Settings { RgbEnabled = true, MonitorFanController = true };
+            rgbSettings.Ports[0].Rgb = true; rgbSettings.Ports[0].RgbEffect = RgbEffect.RainbowWave;
+            var simulation = new Engine(_ => fake, () => t with { Time = DateTimeOffset.UtcNow }, () => []);
+            simulation.Start(rgbSettings, true);
+            Thread.Sleep(2200); Task.Run(async () => await simulation.Stop()).GetAwaiter().GetResult();
+            Check(fake.DutyWrites == 0, "RGB-only session must never send fan duty writes.");
+            Check(fake.LightingFrames is >= 3 and <= 14, "RGB cadence must remain bounded near five frames/second.");
+            Check(simulation.Fans.Count == 5, "Read-only controller monitoring must expose all five ports.");
+            var conflict = new Engine(_ => throw new InvalidOperationException("Must not open a device"), () => t, () => ["TTRGBPlus"]);
+            bool blocked = false; try { conflict.Start(rgbSettings, true); } catch (InvalidOperationException) { blocked = true; }
+            Check(blocked && !conflict.Running, "Conflicting vendor process must block before device access.");
+            var startup = new Settings { Aio = new DisplaySettings { Enabled = true }, StartLiveAtSignIn = true };
+            Check(StartupManager.ShouldStartLive(startup, ["--startup", "--minimized"], false), "Explicit armed sign-in should use its saved profile.");
+            Check(!StartupManager.ShouldStartLive(startup, [], false), "Manual launch must remain preview even with an armed profile.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--startup"], true), "Shift must bypass live startup.");
+            startup.StartLiveAtSignIn = false;
+            Check(!StartupManager.ShouldStartLive(startup, ["--startup"], false), "Unarmed profile cannot auto-start hardware.");
             using var process = Process.GetCurrentProcess();
             using var repeated = new FrameRenderer();
             using (var warmup = repeated.Render(t, restored.Aio, 480, 480)) { }
@@ -50,5 +69,13 @@ internal static class WidgetChecks
         }
         catch (Exception e)
         { File.WriteAllText(Path.Combine(directory, "widget-checks.json"), JsonSerializer.Serialize(new { passed = false, checks = count, hardwareAccess = false, error = e.ToString() }, Settings.JsonOptions)); return 1; }
+    }
+    private sealed class TestController : IFanController
+    {
+        public int DutyWrites, LightingFrames;
+        public void SetDuty(int port, int duty) => Interlocked.Increment(ref DutyWrites);
+        public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) => Interlocked.Increment(ref LightingFrames);
+        public FanReading Read(int port) => new(port, 1200 + port * 100, 40);
+        public void Dispose() { }
     }
 }

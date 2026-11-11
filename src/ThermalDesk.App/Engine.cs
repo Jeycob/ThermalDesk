@@ -6,6 +6,12 @@ namespace ThermalDesk.App;
 
 internal sealed class Engine
 {
+    private readonly Func<string, IFanController> openController;
+    private readonly Func<Telemetry>? testTelemetry;
+    private readonly Func<string[]> conflicts;
+    public Engine() : this(serial => new FanController(serial), null, Conflicts) { }
+    internal Engine(Func<string, IFanController> controllerFactory, Func<Telemetry>? telemetryReader, Func<string[]> findConflicts)
+    { openController = controllerFactory; testTelemetry = telemetryReader; conflicts = findConflicts; }
     private CancellationTokenSource? stop;
     private Task[] tasks = [];
     private Telemetry latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
@@ -36,7 +42,7 @@ internal sealed class Engine
     {
         if (Running) throw new InvalidOperationException("Stop the current session first.");
         settings.Validate();
-        if (live && Conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", Conflicts()));
+        if (live && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
         var s = settings.Copy(); stop = new(); var token = stop.Token; Live = live; conflictingController = false;
         Status.Clear(); Fans.Clear();
         latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
@@ -47,7 +53,7 @@ internal sealed class Engine
         {
             if (s.Panel.Enabled) workers.Add(Task.Run(() => LcdLoop("480×128 panel", s.Panel, true, s.PollSeconds, token)));
             if (s.Aio.Enabled) workers.Add(Task.Run(() => LcdLoop("TOUGHLIQUID AX", s.Aio, false, s.PollSeconds, token)));
-            if (s.CoolingEnabled || s.RgbEnabled) workers.Add(Task.Run(() => FanLoop(s, token)));
+            if (s.CoolingEnabled || s.RgbEnabled || s.MonitorFanController) workers.Add(Task.Run(() => FanLoop(s, token)));
         }
         tasks = workers.ToArray();
     }
@@ -75,10 +81,12 @@ internal sealed class Engine
                 {
                     if (live)
                     {
-                        conflictingController = Conflicts().Length > 0;
+                        conflictingController = conflicts().Length > 0;
                         if (conflictingController) { stop?.Cancel(); Note("Conflicting controller detected; cancelling live control."); }
-                        monitor ??= new();
-                        Volatile.Write(ref latest, monitor.Read() with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray() });
+                        Telemetry reading;
+                        if (testTelemetry is not null) reading = testTelemetry();
+                        else { monitor ??= new(); reading = monitor.Read(); }
+                        Volatile.Write(ref latest, reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray() });
                     }
                     else
                     {
@@ -144,31 +152,51 @@ internal sealed class Engine
         {
             while (!token.IsCancellationRequested)
             {
-                FanController? controller = null;
+                IFanController? controller = null;
                 try
                 {
-                    Guard(token); controller = new(s.ControllerSerial);
+                    Guard(token); controller = openController(s.ControllerSerial);
                     foreach (var p in monitored) { policies[p.Port].Reset(); controller.SetDuty(p.Port, 100); }
                     SetStatus("Controller", "Connected · 264A:232B");
                     var failures = monitored.ToDictionary(p => p.Port, _ => 0);
+                    var clock = Stopwatch.StartNew(); double nextControl = 0, nextLight = 0;
+                    var lastLighting = new Dictionary<int, LedColor[]>(); double lastKeepalive = -2;
                     while (!token.IsCancellationRequested)
                     {
                         Guard(token);
                         // Apply thermal decisions before any slower RPM queries or lighting transfers.
-                        foreach (var p in monitored)
+                        if (clock.Elapsed.TotalSeconds >= nextControl)
                         {
-                            var decision = policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, s.PollSeconds);
-                            controller.SetDuty(p.Port, decision.Duty!.Value);
-                            SetStatus($"Port {p.Port}", $"{decision.Duty}% · {decision.Reason}");
+                            foreach (var p in monitored)
+                            {
+                                var decision = policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, s.PollSeconds);
+                                controller.SetDuty(p.Port, decision.Duty!.Value);
+                                SetStatus($"Port {p.Port}", $"{decision.Duty}% · {decision.Reason}");
+                            }
+                            foreach (var p in s.Ports.Where(p => s.MonitorFanController || monitored.Any(m => m.Port == p.Port) || s.RgbEnabled && p.Rgb))
+                            {
+                                var reading = controller.Read(p.Port); Fans[p.Port] = reading;
+                                if (failures.ContainsKey(p.Port))
+                                {
+                                    failures[p.Port] = reading.Rpm == 0 ? failures[p.Port] + 1 : 0;
+                                    if (failures[p.Port] >= 3) throw new IOException($"Port {p.Port}: repeated zero RPM. Check wiring; requesting safe duty.");
+                                }
+                            }
+                            nextControl = clock.Elapsed.TotalSeconds + Math.Min(s.PollSeconds, 2);
                         }
-                        if (s.RgbEnabled) foreach (var p in s.Ports.Where(p => p.Rgb)) controller.SetRgb(p, s.RgbColor);
-                        foreach (var p in monitored)
+                        if (s.RgbEnabled && clock.Elapsed.TotalSeconds >= nextLight)
                         {
-                            var reading = controller.Read(p.Port); Fans[p.Port] = reading;
-                            failures[p.Port] = reading.Rpm == 0 ? failures[p.Port] + 1 : 0;
-                            if (failures[p.Port] >= 3) throw new IOException($"Port {p.Port}: repeated zero RPM. Check wiring; requesting safe duty.");
+                            double elapsed = clock.Elapsed.TotalSeconds; bool keepalive = elapsed - lastKeepalive >= 2;
+                            foreach (var p in s.Ports.Where(p => p.Rgb))
+                            {
+                                var colors = Lighting.Frame(p, s.RgbColor, elapsed, Latest);
+                                if (keepalive || !lastLighting.TryGetValue(p.Port, out var previous) || !previous.SequenceEqual(colors))
+                                { controller.SetRgbFrame(p.Port, colors); lastLighting[p.Port] = colors; }
+                            }
+                            if (keepalive) lastKeepalive = elapsed; nextLight = elapsed + .2;
                         }
-                        await Task.Delay(TimeSpan.FromSeconds(Math.Min(s.PollSeconds, 2)), token);
+                        // One bounded worker, at most 5 lighting frames/s; control/sensor cadence is independent.
+                        await Task.Delay(s.RgbEnabled && s.Ports.Any(p => p.Rgb && p.RgbEffect != RgbEffect.Static) ? 200 : 1000, token);
                     }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }

@@ -83,4 +83,11 @@ public static partial class Protocols
         for (int i = 0; i < leds; i++) { p[5 + i * 3] = g; p[6 + i * 3] = r; p[7 + i * 3] = b; }
         return p;
     }
+    public static byte[] RgbFrame(int port, IReadOnlyList<LedColor> colors)
+    {
+        if (port is < 1 or > 5 || colors.Count is < 1 or > 62) throw new ArgumentException("Invalid RGB port or LED count.");
+        var packet = FanCommand(0x32, 0x52, port, 0x24);
+        for (int i = 0; i < colors.Count; i++) { packet[5 + i * 3] = colors[i].Green; packet[6 + i * 3] = colors[i].Red; packet[7 + i * 3] = colors[i].Blue; }
+        return packet;
+    }
 }

@@ -112,7 +112,14 @@ internal sealed class AioLcd : ILcd
     public void Dispose() => link.Dispose();
 }
 
-internal sealed class FanController : IDisposable
+internal interface IFanController : IDisposable
+{
+    void SetDuty(int port, int duty);
+    void SetRgbFrame(int port, IReadOnlyList<LedColor> colors);
+    FanReading Read(int port);
+}
+
+internal sealed class FanController : IFanController
 {
     private readonly HidLink link;
     private readonly int inputLength;
@@ -128,6 +135,7 @@ internal sealed class FanController : IDisposable
     }
     public void SetDuty(int port, int duty) { managed.Add(port); link.Write(Protocols.SetDuty(port, duty)); }
     public void SetRgb(PortSettings port, string color) => link.Write(Protocols.Rgb(port.Port, port.LedCount, color));
+    public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) => link.Write(Protocols.RgbFrame(port, colors));
     public FanReading Read(int port)
     {
         link.Write(Protocols.FanCommand(0x33, 0x51, port));

@@ -1,11 +1,11 @@
-ThermalDesk 0.2.0 — validation record — 2026-11-11
+ThermalDesk 0.3.0 — validation record — 2026-11-11
 
 BUILD
 - Windows x64, private Microsoft .NET SDK 10.0.404.
 - SDK archive verified against Microsoft's SHA-512 release metadata.
 - Portable self-contained runtime: .NET 10.0.15.
 - Release build: succeeded, zero compiler warnings/errors.
-- 127 hardware-independent assertions: passed.
+- 741 hardware-independent core assertions: passed (0.3.0).
 - Native WinForms UI rendered and visually inspected; both simulated LCD previews rendered.
 
 PREVIEW PERFORMANCE (NOT LIVE HARDWARE PERFORMANCE)
@@ -90,3 +90,22 @@ This is a substantial experimental implementation for the identified devices,
 not a verified universal or feature-for-feature replacement for all TT RGB Plus
 products. Keep the existing proven cooling setup until controlled hardware
 acceptance tests have passed. Do not delete TT RGB Plus yet.
+
+0.3.0 CURVES, LIGHTING AND STARTUP — AUTOMATED
+- Release publish succeeded with zero warnings/errors, using cached locked
+  dependencies (--no-restore). A fresh NuGet restore was not repeated because
+  the sandbox could not read the user NuGet.Config; dependencies did not change.
+- 45 application-level checks passed. 200 widget frames rendered in 110 ms;
+  GDI object count stayed at 50. Native curve editor contrast visually checked.
+- New 35-second simulated-UI sample: 0.18% mean total CPU, about 70–78 MiB
+  working set, 14–17 threads, handles 364–368 and fixed 38 GDI / 54 USER objects.
+  Build PC only, not real controller/sensor or long-duration measurements.
+- Native port editor: graph drag, numeric curve points, mode/source/role selection,
+  pump minimum UI floor, independent copied settings, per-port effects/colors.
+- RGB packet tests cover six effects, GRB ordering, timing, brightness and limits.
+- Fake-controller integration: bounded 5 FPS lighting, all-port RPM, no duty
+  writes in RGB-only mode and conflict blocking before opening the controller.
+- Four launch-policy tests: armed explicit startup, ordinary manual preview,
+  Shift bypass and unarmed startup. These do not register tasks or write hardware.
+- New physical RGB, panel, sign-in, thermal soak and all-port tests are pending.
+- No changes to existing TT startup or BIOS pump control are part of these tests.

@@ -119,4 +119,30 @@ try
     Check(settings.Aio.Widgets[0].Foreground != "112233", "roundtrip isolates widget edits");
 }
 finally { File.Delete(path); Directory.Delete(Path.GetDirectoryName(path)!); }
+var lightPort = new PortSettings { Port = 1, LedCount = 12, RgbBrightness = 100, RgbColor = "FF0000" };
+Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele()).All(c => c == new LedColor(255, 0, 0)), "static RGB frame");
+lightPort.RgbBrightness = 50; Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele())[0].Red == 128, "brightness scaling"); lightPort.RgbBrightness = 100;
+lightPort.RgbEffect = RgbEffect.Blink; Check(Lighting.Frame(lightPort, "FFFFFF", 3, Tele()).All(c => c == new LedColor(0, 0, 0)), "blink off phase");
+lightPort.RgbEffect = RgbEffect.Breathing; Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele())[0].Red < Lighting.Frame(lightPort, "FFFFFF", 2, Tele())[0].Red, "breathing waveform");
+lightPort.RgbEffect = RgbEffect.RainbowWave; Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele()).Distinct().Count() > 6, "rainbow addresses individual LEDs");
+lightPort.RgbEffect = RgbEffect.Temperature; lightPort.Source = TemperatureSource.Cpu;
+Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele(85))[0] == new LedColor(255, 0, 0), "critical RGB indication");
+Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele(null))[0] == new LedColor(255, 160, 0), "missing sensor lighting is amber");
+foreach (var effect in Enum.GetValues<RgbEffect>())
+{
+    lightPort.RgbEffect = effect;
+    for (int i = 0; i < 50; i++)
+    {
+        var colors = Lighting.Frame(lightPort, "FFFFFF", i * .2, Tele());
+        Check(colors.Length == 12, $"bounded RGB frame {effect}");
+        var packet = Protocols.RgbFrame(1, colors); Check(packet.Length == 193 && packet[4] == 0x24 && packet[5] == colors[0].Green && packet[6] == colors[0].Red, "RGB protocol GRB order");
+    }
+}
+lightPort.RgbPeriodSeconds = 0; Throws(() => Lighting.Frame(lightPort, "FFFFFF", 0, Tele()), "zero RGB period rejected");
+Throws(() => Protocols.RgbFrame(0, [new(1, 2, 3)]), "RGB port zero rejected");
+settings = new(); settings.Ports[0].RgbPeriodSeconds = double.NaN; Throws(settings.Validate, "NaN RGB profile rejected");
+settings = new(); settings.Ports[0].RgbColor = "GGGGGG"; Throws(settings.Validate, "invalid RGB profile color rejected");
+settings = new(); settings.StartLiveAtSignIn = true; Throws(settings.Validate, "auto live cannot arm an empty profile");
+settings.Aio.Enabled = true; settings.Validate(); Check(true, "explicit saved LCD startup profile validates without enabling fans");
+var portCopy = settings.Ports[0].Copy(); portCopy.RgbEffect = RgbEffect.RainbowWave; portCopy.Curve[0] = new(20, 30); Check(settings.Ports[0].Curve[0].Temperature == 30 && settings.Ports[0].RgbEffect == RgbEffect.Static, "port editor works on independent data");
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");

@@ -20,6 +20,8 @@ internal sealed class MainForm : Form
     private readonly TextBox deviceStatus = new(), log = new(), color = new(), serial = new();
     private readonly PictureBox panelPreview = new(), aioPreview = new();
     private readonly DataGridView ports = new();
+    private readonly Dictionary<int, PortSettings> portDesign = new();
+    private readonly CheckBox monitorFans = new() { Text = "Monitor controller RPM (no speed writes)", AutoSize = true };
     private readonly CheckBox cooling = new() { Text = "Enable USB fan/pump control" }, wiring = new() { Text = "I verified every managed port and independent hardware protection" }, rgb = new() { Text = "Enable RGB on selected ports" };
     private readonly NumericUpDown poll = new() { Minimum = 1, Maximum = 10, Width = 70 };
     private readonly DisplayEditor panelEditor, aioEditor;
@@ -30,9 +32,12 @@ internal sealed class MainForm : Form
     private TimeSpan lastCpu;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool StartMinimized { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool StartupRequested { get; set; }
     public MainForm(Settings initial, string path)
     {
         settings = initial; configPath = path;
+        foreach (var port in initial.Ports) portDesign[port.Port] = port.Copy();
         Text = "ThermalDesk · local hardware control"; BackColor = Background; ForeColor = Color.White;
         Font = new Font("Segoe UI", 10); ClientSize = new Size(1180, 820); MinimumSize = new Size(1000, 720);
         StartPosition = FormStartPosition.CenterScreen;
@@ -73,7 +78,7 @@ internal sealed class MainForm : Form
         coolingPage.Controls.Add(coolingLayout);
         coolingLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Color.FromArgb(255, 194, 100), Text = "Cooling is safety-critical. Identify physical port wiring first. Software cannot guarantee protection after a crash, USB loss, or before Windows sign-in.\nPreserve = no fan-speed writes. Managed ports are requested to run at 100% on normal stop / detected failure." }, 0, 0);
         var flags = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
-        cooling.AutoSize = wiring.AutoSize = rgb.AutoSize = true; flags.Controls.AddRange([cooling, rgb, wiring]); coolingLayout.Controls.Add(flags, 0, 1);
+        cooling.AutoSize = wiring.AutoSize = rgb.AutoSize = true; flags.Controls.AddRange([cooling, rgb, monitorFans, wiring]); coolingLayout.Controls.Add(flags, 0, 1);
         BuildPorts(); coolingLayout.Controls.Add(ports, 0, 2);
         var extras = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 8, 0, 0) };
         color.Width = 100; serial.Width = 190;
@@ -89,14 +94,19 @@ internal sealed class MainForm : Form
         var logsPage = Page(tabs, "Log + diagnostics"); ConfigureText(log); logsPage.Controls.Add(log);
         var diag = Button("Export diagnostics", ExportDiagnostics); diag.Dock = DockStyle.Bottom; logsPage.Controls.Add(diag); diag.BringToFront();
         var about = Page(tabs, "About");
-        var aboutText = new TextBox(); ConfigureText(aboutText); aboutText.Text = "ThermalDesk 0.2.0 — independent, experimental Windows controller\r\n\r\nTargets only the devices identified in this PC: 264A:233D, 264A:2328 (AX firmware), and 264A:232B.\r\n\r\nNo TT process is stopped automatically. No driver protection is disabled. No firmware or flash is modified.\r\n\r\nTelemetry: LibreHardwareMonitor 0.9.6, CPU/GPU/memory only. Some CPU sensors require administrator access and a supported PawnIO setup. Missing CPU temperatures block normal fan curves and request 100% duty.\r\n\r\nDefault: simulated preview; all writes disabled. A saved profile never starts live control automatically. Startup registration opens preview only.\r\n\r\nLCD and fan protocols are implemented from published open-source references, but must be validated on your particular hardware. A successful build or test is not a hardware safety certification.\r\n\r\nNot a universal replacement for every Thermaltake product: no PSU, RAM RGB, cloud sync, firmware updates, or vendor mini-games.\r\n\r\nGPL-3.0-or-later. See LICENSE and THIRD-PARTY-NOTICES.txt for original authors and dependencies."; about.Controls.Add(aboutText);
+        var aboutText = new TextBox(); ConfigureText(aboutText); aboutText.Text = "ThermalDesk 0.3.0 — independent, experimental Windows controller\r\n\r\nTargets only the devices identified in this PC: 264A:233D, 264A:2328 (AX firmware), and 264A:232B.\r\n\r\nNo TT process is stopped automatically. No driver protection is disabled. No firmware or flash is modified.\r\n\r\nTelemetry: LibreHardwareMonitor 0.9.6, CPU/GPU/memory only. Some CPU sensors require administrator access and a supported PawnIO setup. Missing CPU temperatures block normal fan curves and request 100% duty.\r\n\r\nDefault/manual launch: simulated preview; all writes disabled. Automatic live startup requires a saved armed profile AND the registered --startup launch. Hold Shift to bypass it. A conflicting vendor app blocks live access. This is not a before-login cooling service.\r\n\r\nDuty % is a controller request, not watts or RPM. PWM/DC electrical switching is not exposed by the verified protocol. BIOS pump control is unchanged.\r\n\r\nLCD and fan protocols must be validated on your particular hardware. A successful build or test is not a hardware safety certification.\r\n\r\nNo PSU, RAM RGB, cloud sync, firmware updates, or vendor mini-games.\r\n\r\nGPL-3.0-or-later. See LICENSE and THIRD-PARTY-NOTICES.txt for original authors and dependencies."; about.Controls.Add(aboutText);
         var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill }; bottom.Controls.Add(new Label { Text = "Sensor interval (s)", AutoSize = true }); poll.Value = initial.PollSeconds; bottom.Controls.Add(poll); resources.AutoSize = true; resources.ForeColor = Muted; bottom.Controls.Add(resources); shell.Controls.Add(bottom, 0, 4);
-        cooling.Checked = initial.CoolingEnabled; wiring.Checked = initial.CoolingWiringConfirmed; rgb.Checked = initial.RgbEnabled; color.Text = initial.RgbColor; serial.Text = initial.ControllerSerial;
+        cooling.Checked = initial.CoolingEnabled; wiring.Checked = initial.CoolingWiringConfirmed; rgb.Checked = initial.RgbEnabled; monitorFans.Checked = initial.MonitorFanController; color.Text = initial.RgbColor; serial.Text = initial.ControllerSerial;
         tray.ContextMenuStrip = new ContextMenuStrip(); tray.ContextMenuStrip.Items.Add("Open", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
         tray.ContextMenuStrip.Items.Add("Stop hardware control", null, async (_, _) => await Run(async () => await engine.Stop()));
         tray.ContextMenuStrip.Items.Add("Exit", null, (_, _) => { exiting = true; Close(); }); tray.DoubleClick += (_, _) => { Show(); Activate(); };
         refresh.Tick += (_, _) => { if (Visible && !busy) RefreshData(); };
-        Shown += (_, _) => { if (smokeMode) return; engine.Start(settings, false); refresh.Start(); tray.Visible = true; if (StartMinimized) Hide(); };
+        Shown += (_, _) =>
+        {
+            if (smokeMode) return;
+            try { engine.Start(settings, StartupRequested && settings.StartLiveAtSignIn); refresh.Start(); tray.Visible = true; if (StartMinimized) Hide(); }
+            catch (Exception error) { refresh.Start(); tray.Visible = true; Show(); Error(new InvalidOperationException("Startup was blocked safely. No conflicting app was stopped. " + error.Message)); }
+        };
         Resize += (_, _) => { if (WindowState == FormWindowState.Minimized && tray.Visible) Hide(); };
         FormClosing += ClosingAsync;
         ApplyColors(this);
@@ -134,21 +144,34 @@ internal sealed class MainForm : Form
         ports.Columns.Add(new DataGridViewCheckBoxColumn { Name = "RGB", FillWeight = 36 });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "LEDs", FillWeight = 36 });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Curve", HeaderText = "Curve · °C:% separated by ;", FillWeight = 210 });
+        ports.Columns.Add(new DataGridViewButtonColumn { Name = "Editor", HeaderText = "Curve / RGB", Text = "Edit…", UseColumnTextForButtonValue = true, FillWeight = 60 });
         foreach (var p in settings.Ports) ports.Rows.Add(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount, string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));
         ports.DataError += (_, e) => { e.ThrowException = false; };
+        ports.CellContentClick += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex != 9) return;
+            try
+            {
+                ports.EndEdit(); var row = ports.Rows[e.RowIndex]; using var editor = new PortEditorForm(ReadPort(row));
+                if (editor.ShowDialog(this) != DialogResult.OK) return;
+                var p = editor.Result; portDesign[p.Port] = p.Copy();
+                row.SetValues(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount, string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));
+            }
+            catch (Exception error) { Error(error); }
+        };
+    }
+    private PortSettings ReadPort(DataGridViewRow row)
+    {
+        static string Cell(DataGridViewRow r, int i) => Convert.ToString(r.Cells[i].Value, CultureInfo.InvariantCulture) ?? throw new ArgumentException("Missing port value.");
+        int port = Convert.ToInt32(row.Cells[0].Value); var p = portDesign[port].Copy();
+        p.Role = Enum.Parse<PortRole>(Cell(row, 1)); p.Mode = Enum.Parse<ControlMode>(Cell(row, 2)); p.Source = Enum.Parse<TemperatureSource>(Cell(row, 3)); p.MinimumDuty = Convert.ToInt32(row.Cells[4].Value); p.FixedDuty = Convert.ToInt32(row.Cells[5].Value); p.Rgb = Convert.ToBoolean(row.Cells[6].Value); p.LedCount = Convert.ToInt32(row.Cells[7].Value);
+        p.Curve = Cell(row, 8).Split(';', StringSplitOptions.RemoveEmptyEntries).Select(x => { var pair = x.Split(':'); if (pair.Length != 2) throw new ArgumentException("Curve format: 30:40;50:50;65:70;75:90;80:100"); return new CurvePoint(double.Parse(pair[0], CultureInfo.InvariantCulture), double.Parse(pair[1], CultureInfo.InvariantCulture)); }).ToList(); return p;
     }
     private Settings ReadSettings()
     {
         ports.EndEdit();
-        static string Cell(DataGridViewRow row, int index) => Convert.ToString(row.Cells[index].Value, CultureInfo.InvariantCulture)
-            ?? throw new ArgumentException($"Missing value in port row {row.Index + 1}, column {index + 1}.");
-        var s = new Settings { PollSeconds = (int)poll.Value, CoolingEnabled = cooling.Checked, CoolingWiringConfirmed = wiring.Checked, RgbEnabled = rgb.Checked, RgbColor = color.Text.Trim().TrimStart('#'), ControllerSerial = serial.Text.Trim(), Panel = panelEditor.Read(), Aio = aioEditor.Read() };
-        s.Ports = ports.Rows.Cast<DataGridViewRow>().Select(r => new PortSettings
-        {
-            Port = Convert.ToInt32(r.Cells[0].Value), Role = Enum.Parse<PortRole>(Cell(r, 1)), Mode = Enum.Parse<ControlMode>(Cell(r, 2)), Source = Enum.Parse<TemperatureSource>(Cell(r, 3)),
-            MinimumDuty = Convert.ToInt32(r.Cells[4].Value), FixedDuty = Convert.ToInt32(r.Cells[5].Value), Rgb = Convert.ToBoolean(r.Cells[6].Value), LedCount = Convert.ToInt32(r.Cells[7].Value),
-            Curve = Cell(r, 8).Split(';', StringSplitOptions.RemoveEmptyEntries).Select(x => { var p = x.Split(':'); if (p.Length != 2) throw new ArgumentException("Curve format: 30:40;50:50;65:70;75:90;80:100"); return new CurvePoint(double.Parse(p[0], CultureInfo.InvariantCulture), double.Parse(p[1], CultureInfo.InvariantCulture)); }).ToList()
-        }).ToList(); s.Validate(); return s;
+        var s = new Settings { PollSeconds = (int)poll.Value, CoolingEnabled = cooling.Checked, CoolingWiringConfirmed = wiring.Checked, RgbEnabled = rgb.Checked, MonitorFanController = monitorFans.Checked, StartLiveAtSignIn = settings.StartLiveAtSignIn, RgbColor = color.Text.Trim().TrimStart('#'), ControllerSerial = serial.Text.Trim(), Panel = panelEditor.Read(), Aio = aioEditor.Read() };
+        s.Ports = ports.Rows.Cast<DataGridViewRow>().Select(ReadPort).ToList(); s.Validate(); return s;
     }
     private async Task Run(Func<Task> action)
     {
@@ -197,7 +220,7 @@ internal sealed class MainForm : Form
             {
                 using var d = new OpenFileDialog { Filter = "JSON profile|*.json" };
                 if (d.ShowDialog() != DialogResult.OK) return;
-                var imported = SettingsStore.Load(d.FileName); SettingsStore.Save(configPath, imported);
+                var imported = SettingsStore.Load(d.FileName); imported.StartLiveAtSignIn = false; SettingsStore.Save(configPath, imported);
                 Info("Profile imported. Close and reopen ThermalDesk to load it. It will start in preview, not live control.");
             }
             catch (Exception e) { Error(e); }
@@ -206,10 +229,25 @@ internal sealed class MainForm : Form
     }
     private void ConfigureStartup()
     {
-        using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
-        bool exists = key.GetValue("ThermalDesk") is not null;
-        if (MessageBox.Show(exists ? "Remove ThermalDesk from sign-in startup?" : "Start ThermalDesk in the tray at sign-in? It starts in preview only; live cooling does NOT start automatically.", "Startup", MessageBoxButtons.YesNo) != DialogResult.Yes) return;
-        if (exists) key.DeleteValue("ThermalDesk", false); else key.SetValue("ThermalDesk", $"\"{Application.ExecutablePath}\" --minimized");
+        var menu = new ContextMenuStrip();
+        menu.Items.Add(StartupManager.State()).Enabled = false;
+        menu.Items.Add("Start preview at sign-in", null, (_, _) =>
+        { try { StartupManager.Configure(false); settings.StartLiveAtSignIn = false; SettingsStore.Save(configPath, ReadSettings()); Info("Preview startup registered for this Windows user."); } catch (Exception e) { Error(e); } });
+        menu.Items.Add("Start saved LIVE profile at sign-in…", null, (_, _) =>
+        {
+            try
+            {
+                var next = ReadSettings(); next.StartLiveAtSignIn = true; next.Validate();
+                if (MessageBox.Show("Start the saved live profile automatically after Windows sign-in?\n\nValidate every configured device and independent cooling protection first. The task runs elevated for sensor access. Close/disable vendor auto-start yourself only after hardware tests pass. Conflicts block startup; TT is never killed. This is not a before-login cooling service.\n\nHold Shift during launch to bypass live startup. Missing temperatures still request safe duty on managed channels.", "Confirm automatic live startup", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+                var old = settings.Copy(); SettingsStore.Save(configPath, next);
+                try { StartupManager.Configure(true); settings = next; Info("Elevated live sign-in task registered. Saved devices only; next sign-in will apply it."); }
+                catch { SettingsStore.Save(configPath, old); throw; }
+            }
+            catch (Exception e) { Error(e); }
+        });
+        menu.Items.Add("Remove ThermalDesk startup", null, (_, _) =>
+        { try { StartupManager.Remove(); settings.StartLiveAtSignIn = false; SettingsStore.Save(configPath, ReadSettings()); Info("ThermalDesk startup removed. Other applications were not changed."); } catch (Exception e) { Error(e); } });
+        menu.Closed += (_, _) => menu.Dispose(); menu.Show(Cursor.Position);
     }
     private void ExportDiagnostics()
     {

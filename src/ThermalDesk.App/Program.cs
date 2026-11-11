@@ -38,6 +38,7 @@ internal static class Program
                 form.RenderPreview(Path.GetFullPath(args[preview + 1])); return 0;
             }
             form.StartMinimized = args.Contains("--minimized");
+            form.StartupRequested = StartupManager.ShouldStartLive(config, args, (Control.ModifierKeys & Keys.Shift) != 0);
             Application.Run(form);
             return 0;
         }

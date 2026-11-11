@@ -7,6 +7,7 @@ public enum ControlMode { Preserve, Fixed, Curve }
 public enum PortRole { Unknown, Fan, Pump }
 public enum TemperatureSource { Cpu, Gpu, Maximum }
 public enum DisplayContent { Dashboard, Image, Screen }
+public enum RgbEffect { Static, Breathing, Blink, ColorCycle, RainbowWave, Temperature }
 public sealed record CurvePoint(double Temperature, double Duty);
 public sealed record Telemetry(DateTimeOffset Time, double? CpuTemperature, double? GpuTemperature,
     double? CpuLoad, double? GpuLoad, double? MemoryUsedPercent, string Warning = "")
@@ -27,7 +28,12 @@ public sealed class PortSettings
     public int FixedDuty { get; set; } = 70;
     public bool Rgb { get; set; }
     public int LedCount { get; set; } = 12;
+    public RgbEffect RgbEffect { get; set; } = RgbEffect.Static;
+    public string RgbColor { get; set; } = "";
+    public int RgbBrightness { get; set; } = 70;
+    public double RgbPeriodSeconds { get; set; } = 4;
     public List<CurvePoint> Curve { get; set; } = [new(30, 40), new(50, 50), new(65, 70), new(75, 90), new(80, 100)];
+    public PortSettings Copy() => JsonSerializer.Deserialize<PortSettings>(JsonSerializer.Serialize(this, Settings.JsonOptions), Settings.JsonOptions)!;
 }
 public sealed class DisplaySettings
 {
@@ -50,6 +56,8 @@ public sealed class Settings
     public bool CoolingEnabled { get; set; }
     public bool CoolingWiringConfirmed { get; set; }
     public bool RgbEnabled { get; set; }
+    public bool MonitorFanController { get; set; }
+    public bool StartLiveAtSignIn { get; set; }
     public string RgbColor { get; set; } = "23D6BA";
     public string ControllerSerial { get; set; } = "";
     public DisplaySettings Panel { get; set; } = new();
@@ -67,6 +75,8 @@ public sealed class Settings
         foreach (var p in Ports)
         {
             if (!Enum.IsDefined(p.Role) || !Enum.IsDefined(p.Mode) || !Enum.IsDefined(p.Source)) throw new ArgumentException("Invalid port setting.");
+            if (!Enum.IsDefined(p.RgbEffect) || p.RgbBrightness is < 0 or > 100 || !double.IsFinite(p.RgbPeriodSeconds) || p.RgbPeriodSeconds is < 1 or > 60 || !WidgetLayout.IsColor(p.RgbColor, true))
+                throw new ArgumentException($"Port {p.Port}: invalid RGB effect, color, brightness (0–100%) or period (1–60 seconds).");
             if (p.MinimumDuty is < 30 or > 100 || p.FixedDuty is < 30 or > 100 || p.LedCount is < 1 or > 62)
                 throw new ArgumentException($"Port {p.Port}: duty must be 30–100%, LEDs 1–62.");
             if (p.Mode != ControlMode.Preserve && p.Role == PortRole.Unknown)
@@ -88,6 +98,8 @@ public sealed class Settings
         WidgetLayout.Validate(Aio, 480, 480);
         if (CoolingEnabled && (!CoolingWiringConfirmed || Ports.All(p => p.Mode == ControlMode.Preserve)))
             throw new ArgumentException("Cooling requires confirmed wiring and at least one configured port.");
+        if (StartLiveAtSignIn && !Panel.Enabled && !Aio.Enabled && !CoolingEnabled && !RgbEnabled && !MonitorFanController)
+            throw new ArgumentException("Select and validate at least one live device before enabling live sign-in startup.");
     }
     public Settings Copy() => JsonSerializer.Deserialize<Settings>(JsonSerializer.Serialize(this, JsonOptions), JsonOptions)!;
     public static JsonSerializerOptions JsonOptions => new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
