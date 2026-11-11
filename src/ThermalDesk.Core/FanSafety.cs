@@ -11,8 +11,8 @@ public sealed class FanSafety
         if (p.Role == PortRole.Unknown) throw new InvalidOperationException("Unknown wiring cannot be controlled.");
         // Zero/sentinel readings from an inaccessible sensor must not look like an idle CPU.
         bool Valid(double? v) => v.HasValue && double.IsFinite(v.Value) && v.Value is >= 5 and <= 115;
-        if (now - t.Time > TimeSpan.FromSeconds(5) || t.Time > now + TimeSpan.FromSeconds(1)) return Full("Stale telemetry");
-        if (!Valid(t.CpuTemperature)) return Full("CPU sensor unavailable");
+        if (now - t.Time > TimeSpan.FromSeconds(5) || t.Time > now + TimeSpan.FromSeconds(1)) return Release("Stale telemetry");
+        if (!Valid(t.CpuTemperature)) return Release("CPU sensor unavailable");
         if (t.CpuTemperature >= 85 || (Valid(t.GpuTemperature) && t.GpuTemperature >= 85)) return Full("Critical temperature");
         double? temperature = p.Source switch
         {
@@ -20,7 +20,7 @@ public sealed class FanSafety
             TemperatureSource.Gpu => t.GpuTemperature,
             _ => Valid(t.GpuTemperature) ? Math.Max(t.CpuTemperature!.Value, t.GpuTemperature!.Value) : null
         };
-        if (p.Mode == ControlMode.Curve && !Valid(temperature)) return Full("Selected sensor unavailable");
+        if (p.Mode == ControlMode.Curve && !Valid(temperature)) return Release("Selected sensor unavailable");
         double target;
         if (p.Mode == ControlMode.Fixed) target = p.FixedDuty;
         else
@@ -37,6 +37,7 @@ public sealed class FanSafety
         return new((int)Math.Ceiling(target), p.Mode == ControlMode.Fixed ? "Fixed" : $"Curve · {heldTemperature:0.0} °C");
     }
     private FanDecision Full(string reason) { previous = 100; heldTemperature = null; return new(100, reason); }
+    private FanDecision Release(string reason) => new(null, reason + " · release software control; do not force full speed");
     public void Reset() { previous = heldTemperature = null; }
     public static double Interpolate(IReadOnlyList<CurvePoint> points, double value)
     {
