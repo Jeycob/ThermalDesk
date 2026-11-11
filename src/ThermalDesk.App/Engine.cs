@@ -78,7 +78,7 @@ internal sealed class Engine
                         conflictingController = Conflicts().Length > 0;
                         if (conflictingController) { stop?.Cancel(); Note("Conflicting controller detected; cancelling live control."); }
                         monitor ??= new();
-                        Volatile.Write(ref latest, monitor.Read());
+                        Volatile.Write(ref latest, monitor.Read() with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray() });
                     }
                     else
                     {

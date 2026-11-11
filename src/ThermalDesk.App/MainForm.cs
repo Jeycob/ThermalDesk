@@ -83,13 +83,13 @@ internal sealed class MainForm : Form
         var displayLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(12) };
         displayLayout.ColumnStyles.Add(new(SizeType.Percent, 50)); displayLayout.ColumnStyles.Add(new(SizeType.Percent, 50));
         displayLayout.RowStyles.Add(new(SizeType.Percent, 100)); displayLayout.RowStyles.Add(new(SizeType.Absolute, 68)); displays.Controls.Add(displayLayout);
-        panelEditor = new("3.9-inch LCD · 264A:233D", settings.Panel); aioEditor = new("TOUGHLIQUID AX · 264A:2328", settings.Aio);
+        panelEditor = new("3.9-inch LCD · 264A:233D", settings.Panel, 480, 128, () => engine.Latest); aioEditor = new("TOUGHLIQUID AX · 264A:2328", settings.Aio, 480, 480, () => engine.Latest);
         displayLayout.Controls.Add(panelEditor, 0, 0); displayLayout.Controls.Add(aioEditor, 1, 0);
         displayLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Muted, Text = "Images: JPEG, PNG, GIF, BMP / up to 25 MiB. GIF playback is capped at the display refresh rate.\nScreen mode sends the primary desktop to the LCD only when you explicitly start live control. No network server or cloud." }, 0, 1); displayLayout.SetColumnSpan(displayLayout.GetControlFromPosition(0, 1)!, 2);
         var logsPage = Page(tabs, "Log + diagnostics"); ConfigureText(log); logsPage.Controls.Add(log);
         var diag = Button("Export diagnostics", ExportDiagnostics); diag.Dock = DockStyle.Bottom; logsPage.Controls.Add(diag); diag.BringToFront();
         var about = Page(tabs, "About");
-        var aboutText = new TextBox(); ConfigureText(aboutText); aboutText.Text = "ThermalDesk 0.1.0 — independent, experimental Windows controller\r\n\r\nTargets only the devices identified in this PC: 264A:233D, 264A:2328 (AX firmware), and 264A:232B.\r\n\r\nNo TT process is stopped automatically. No driver protection is disabled. No firmware or flash is modified.\r\n\r\nTelemetry: LibreHardwareMonitor 0.9.6, CPU/GPU/memory only. Some CPU sensors require administrator access and a supported PawnIO setup. Missing CPU temperatures block normal fan curves and request 100% duty.\r\n\r\nDefault: simulated preview; all writes disabled. A saved profile never starts live control automatically. Startup registration opens preview only.\r\n\r\nLCD and fan protocols are implemented from published open-source references, but must be validated on your particular hardware. A successful build or test is not a hardware safety certification.\r\n\r\nNot a universal replacement for every Thermaltake product: no PSU, RAM RGB, cloud sync, firmware updates, or vendor mini-games.\r\n\r\nGPL-3.0-or-later. See LICENSE and THIRD-PARTY-NOTICES.txt for original authors and dependencies."; about.Controls.Add(aboutText);
+        var aboutText = new TextBox(); ConfigureText(aboutText); aboutText.Text = "ThermalDesk 0.2.0 — independent, experimental Windows controller\r\n\r\nTargets only the devices identified in this PC: 264A:233D, 264A:2328 (AX firmware), and 264A:232B.\r\n\r\nNo TT process is stopped automatically. No driver protection is disabled. No firmware or flash is modified.\r\n\r\nTelemetry: LibreHardwareMonitor 0.9.6, CPU/GPU/memory only. Some CPU sensors require administrator access and a supported PawnIO setup. Missing CPU temperatures block normal fan curves and request 100% duty.\r\n\r\nDefault: simulated preview; all writes disabled. A saved profile never starts live control automatically. Startup registration opens preview only.\r\n\r\nLCD and fan protocols are implemented from published open-source references, but must be validated on your particular hardware. A successful build or test is not a hardware safety certification.\r\n\r\nNot a universal replacement for every Thermaltake product: no PSU, RAM RGB, cloud sync, firmware updates, or vendor mini-games.\r\n\r\nGPL-3.0-or-later. See LICENSE and THIRD-PARTY-NOTICES.txt for original authors and dependencies."; about.Controls.Add(aboutText);
         var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill }; bottom.Controls.Add(new Label { Text = "Sensor interval (s)", AutoSize = true }); poll.Value = initial.PollSeconds; bottom.Controls.Add(poll); resources.AutoSize = true; resources.ForeColor = Muted; bottom.Controls.Add(resources); shell.Controls.Add(bottom, 0, 4);
         cooling.Checked = initial.CoolingEnabled; wiring.Checked = initial.CoolingWiringConfirmed; rgb.Checked = initial.RgbEnabled; color.Text = initial.RgbColor; serial.Text = initial.ControllerSerial;
         tray.ContextMenuStrip = new ContextMenuStrip(); tray.ContextMenuStrip.Items.Add("Open", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
@@ -271,23 +271,54 @@ internal sealed class MainForm : Form
 internal sealed class DisplayEditor : GroupBox
 {
     private readonly CheckBox enabled = new() { Text = "Enable this LCD", AutoSize = true }, overlay = new() { Text = "Metrics overlay", AutoSize = true };
+    private readonly CheckBox custom = new() { Text = "Use custom widget layout", AutoSize = true };
     private readonly ComboBox content = new() { DropDownStyle = ComboBoxStyle.DropDownList }, rotation = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox path = new();
     private readonly NumericUpDown brightness = new() { Minimum = 0, Maximum = 100 };
     private readonly NumericUpDown frames = new() { Minimum = 1, Maximum = 10 };
-    public DisplayEditor(string title, DisplaySettings s)
+    private DisplaySettings design;
+    public DisplayEditor(string title, DisplaySettings s, int width, int height, Func<Telemetry> telemetry)
     {
+        design = s.Copy();
         Text = title; Dock = DockStyle.Fill; ForeColor = Color.White; Padding = new Padding(16); Margin = new Padding(5);
-        var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 8 };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 10 };
         grid.ColumnStyles.Add(new(SizeType.Absolute, 115)); grid.ColumnStyles.Add(new(SizeType.Percent, 100)); Controls.Add(grid);
         content.Items.AddRange(Enum.GetNames<DisplayContent>()); rotation.Items.AddRange(["0", "90", "180", "270"]);
-        enabled.Checked = s.Enabled; overlay.Checked = s.Overlay; content.SelectedItem = s.Content.ToString(); rotation.SelectedItem = s.Rotation.ToString(); brightness.Value = s.Brightness; frames.Value = s.FramesPerSecond; path.Text = s.MediaPath;
+        enabled.Checked = s.Enabled; overlay.Checked = s.Overlay; custom.Checked = s.UseCustomLayout; content.SelectedItem = s.Content.ToString(); rotation.SelectedItem = s.Rotation.ToString(); brightness.Value = s.Brightness; frames.Value = s.FramesPerSecond; path.Text = s.MediaPath;
         grid.Controls.Add(enabled, 0, 0); grid.SetColumnSpan(enabled, 2);
         var fields = new (string, Control)[] { ("Content", content), ("Media file", path), ("Brightness %", brightness), ("Rotation °", rotation), ("Frames / sec", frames), ("", overlay) };
         for (int i = 0; i < fields.Length; i++) { grid.RowStyles.Add(new(SizeType.Absolute, 42)); grid.Controls.Add(new Label { Text = fields[i].Item1, AutoSize = true, Margin = new Padding(0, 8, 0, 0) }, 0, i + 1); fields[i].Item2.Dock = DockStyle.Fill; grid.Controls.Add(fields[i].Item2, 1, i + 1); }
         var browse = new Button { Text = "Choose image / GIF", AutoSize = true, FlatStyle = FlatStyle.Flat };
         browse.Click += (_, _) => { using var d = new OpenFileDialog { Filter = "Images|*.jpg;*.jpeg;*.png;*.gif;*.bmp" }; if (d.ShowDialog() == DialogResult.OK) { path.Text = d.FileName; content.SelectedItem = "Image"; } };
         grid.Controls.Add(browse, 1, 7);
+        grid.RowStyles.Add(new(SizeType.Absolute, 40)); grid.RowStyles.Add(new(SizeType.Absolute, 40)); grid.RowStyles.Add(new(SizeType.Absolute, 46));
+        grid.Controls.Add(custom, 1, 8);
+        var edit = new Button { Text = "Edit widgets…", AutoSize = true, FlatStyle = FlatStyle.Flat };
+        edit.Click += (_, _) =>
+        {
+            try
+            {
+                using var editor = new WidgetDesignerForm(title, Read(), width, height, telemetry);
+                if (editor.ShowDialog(FindForm()) == DialogResult.OK) { design = editor.Result; custom.Checked = true; overlay.Checked = true; }
+            }
+            catch (Exception error) { MessageBox.Show(error.Message, "Widget designer", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        };
+        grid.Controls.Add(edit, 1, 9);
+        rotation.SelectedIndexChanged += (_, _) =>
+        {
+            var before = WidgetLayout.Canvas(design, width, height);
+            design.Rotation = int.Parse((string)rotation.SelectedItem!, CultureInfo.InvariantCulture);
+            var after = WidgetLayout.Canvas(design, width, height);
+            if (before != after) WidgetLayout.Reframe(design, before.Width, before.Height, after.Width, after.Height);
+        };
+        custom.CheckedChanged += (_, _) =>
+        {
+            if (custom.Checked && design.Widgets.Count == 0)
+            { var size = WidgetLayout.Canvas(design, width, height); design.Widgets = WidgetLayout.Defaults(size.Width, size.Height); }
+        };
     }
-    public DisplaySettings Read() => new() { Enabled = enabled.Checked, Content = Enum.Parse<DisplayContent>((string)content.SelectedItem!), MediaPath = path.Text.Trim(), Brightness = (int)brightness.Value, FramesPerSecond = (int)frames.Value, Rotation = int.Parse((string)rotation.SelectedItem!, CultureInfo.InvariantCulture), Overlay = overlay.Checked };
+    public DisplaySettings Read()
+    {
+        var result = design.Copy(); result.Enabled = enabled.Checked; result.Content = Enum.Parse<DisplayContent>((string)content.SelectedItem!); result.MediaPath = path.Text.Trim(); result.Brightness = (int)brightness.Value; result.FramesPerSecond = (int)frames.Value; result.Rotation = int.Parse((string)rotation.SelectedItem!, CultureInfo.InvariantCulture); result.Overlay = overlay.Checked; result.UseCustomLayout = custom.Checked; return result;
+    }
 }

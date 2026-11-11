@@ -24,10 +24,13 @@ function Write-Zip([string]$Destination, [string]$Base, [IO.FileInfo[]]$Files) {
         } finally { $zip.Dispose() }
     } finally { $stream.Dispose() }
 }
-Write-Zip (Join-Path $artifacts 'ThermalDesk-0.1.0-preview-win-x64.zip') $binary @(Get-ChildItem -LiteralPath $binary -File -Recurse)
+[xml]$project = Get-Content -LiteralPath (Join-Path $root 'src/ThermalDesk.App/ThermalDesk.App.csproj') -Raw
+$version = [string]$project.Project.PropertyGroup.Version
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid package version.' }
+Write-Zip (Join-Path $artifacts "ThermalDesk-$version-preview-win-x64.zip") $binary @(Get-ChildItem -LiteralPath $binary -File -Recurse)
 $files = @('.gitignore','Directory.Build.props','NuGet.Config','build.ps1','package.ps1','README.md','LICENSE','THIRD-PARTY-NOTICES.txt','VALIDATION.txt') | ForEach-Object { Get-Item -LiteralPath (Join-Path $root $_) }
 $files += Get-ChildItem -LiteralPath (Join-Path $root 'src'),(Join-Path $root 'tests'),(Join-Path $root 'licenses') -File -Recurse | Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' }
-Write-Zip (Join-Path $artifacts 'ThermalDesk-0.1.0-source.zip') $root $files
-$hashes = @(Get-FileHash -LiteralPath (Join-Path $artifacts 'ThermalDesk-0.1.0-preview-win-x64.zip'),(Join-Path $artifacts 'ThermalDesk-0.1.0-source.zip') -Algorithm SHA256 | Select-Object @{n='File';e={[IO.Path]::GetFileName($_.Path)}},Hash)
+Write-Zip (Join-Path $artifacts "ThermalDesk-$version-source.zip") $root $files
+$hashes = @(Get-FileHash -LiteralPath (Join-Path $artifacts "ThermalDesk-$version-preview-win-x64.zip"),(Join-Path $artifacts "ThermalDesk-$version-source.zip") -Algorithm SHA256 | Select-Object @{n='File';e={[IO.Path]::GetFileName($_.Path)}},Hash)
 $hashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $artifacts 'SHA256.json') -Encoding utf8
 $hashes | Format-List

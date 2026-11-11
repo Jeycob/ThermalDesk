@@ -1,11 +1,11 @@
-ThermalDesk 0.1.0 — validation record — 2026-11-11
+ThermalDesk 0.2.0 — validation record — 2026-11-11
 
 BUILD
 - Windows x64, private Microsoft .NET SDK 10.0.404.
 - SDK archive verified against Microsoft's SHA-512 release metadata.
 - Portable self-contained runtime: .NET 10.0.15.
 - Release build: succeeded, zero compiler warnings/errors.
-- 93 hardware-independent assertions: passed.
+- 127 hardware-independent assertions: passed.
 - Native WinForms UI rendered and visually inspected; both simulated LCD previews rendered.
 
 PREVIEW PERFORMANCE (NOT LIVE HARDWARE PERFORMANCE)
@@ -31,11 +31,11 @@ TARGET-PC READ-ONLY CHECK
   did not install drivers, and did not change startup settings.
 
 NOT YET VERIFIED ON PHYSICAL HARDWARE
-- Actual panel/AIO frame display, brightness, image rotation and firmware variant.
+- 3.9-inch panel frame display; rotations/custom layouts on either physical LCD.
 - Actual RGB colors and LED counts on the user's controller.
-- Physical fan/pump wiring, RPM feedback and safe minimum speeds.
+- Ports 2–5 speed control, pump wiring/control and safe minimum speeds.
 - USB loss, sleep/resume, cold boot and controller firmware fail-safe behavior.
-- Real sensor availability and long-duration resource use on the target PC.
+- Long-duration sensor/resource use on the target PC.
 - No unattended cooling certification or crash-proof protection is claimed.
 
 FOLLOW-UP ACCEPTANCE — 2026-11-11
@@ -62,8 +62,28 @@ REPEATED PHYSICAL LCD TEST — PASSED
   transport. Test duration and status-poll ordering both changed; causality is unknown.
 - Labels/clock have subsequently been enlarged at the operator's request. This
   purely visual change is built but not physically size-confirmed yet.
-- CPU sensor support, physical speed changes, RGB colors and unattended cooling
-  remain unverified. Do not mistake a successful LCD test for complete replacement.
+- RGB colors and unattended cooling remain unverified. Do not mistake a successful
+  LCD test for complete replacement. Follow-up sensor/fan results are below.
+
+SIGNED SENSOR DRIVER AND PORT-1 CURVES — PASSED
+- Approved official restricted PawnIO 2.2.0 installer hash matched Microsoft's
+  package manifest. Installer and installed driver signatures were valid.
+- Elevated checks read CPU temperature successfully (about 70–73 °C).
+- GPU core is selected separately from hotspot/memory temperatures.
+- Attended port-1 curve test: 30% / 429 RPM baseline, 78% / 1577 RPM,
+  then 98% / 1974 RPM; commands reported back. Original 30% restored/confirmed.
+- RPM was still decelerating immediately after restoration. TT restarted.
+- BIOS/pump and other ports untouched. No new physical tests for release 0.2.0.
+
+WIDGET DESIGNER — AUTOMATED, NO USB
+- Independent 480×128 and 480×480 outputs render at 0/90/180/270 degrees.
+- Native designer screenshots visually checked for both canvas sizes.
+- 33 app-level checks passed: persistence, add/duplicate/delete, z-order,
+  source/font/text/color edits, keyboard move, mouse resize, invalid edit rollback,
+  isolation from input settings and output dimensions.
+- 200 successive widget renders: GDI objects 47 before and 47 after.
+  Approximately 124 ms total on build PC, not live USB/sensor performance.
+- New custom widgets have not yet been confirmed on physical LCDs.
 
 RELEASE LIMIT
 This is a substantial experimental implementation for the identified devices,

@@ -77,4 +77,46 @@ Throws(() => Protocols.SetDuty(6, 100), "invalid port rejected");
 var duty = Protocols.SetDuty(2, 80); Check(duty[1] == 0x32 && duty[2] == 0x51 && duty[3] == 2 && duty[4] == 1 && duty[5] == 80, "duty command");
 var reply = new byte[] { 0, 0x33, 0x51, 2, 0, 80, 0x34, 0x12 }; Check(Protocols.ParseFan(reply, 2).Rpm == 0x1234, "RPM little endian");
 Throws(() => Protocols.ParseFan(reply, 3), "cross-port reply refused"); reply[1] = 0; Throws(() => Protocols.ParseFan(reply, 2), "unrelated reply refused");
+foreach (var physical in new[] { (480, 128), (480, 480) })
+foreach (int rotation in new[] { 0, 90, 180, 270 })
+{
+    var display = new DisplaySettings { UseCustomLayout = true, Rotation = rotation };
+    var size = WidgetLayout.Canvas(display, physical.Item1, physical.Item2);
+    display.Widgets = WidgetLayout.Defaults(size.Width, size.Height);
+    WidgetLayout.Validate(display, physical.Item1, physical.Item2); Check(true, $"valid widget template {physical} rotation {rotation}");
+    var saved = display.Copy(); saved.Widgets[0].TextTemplate = "changed";
+    Check(display.Widgets[0].TextTemplate != "changed", "widget deep copy");
+}
+var widgets = new DisplaySettings { UseCustomLayout = true, Widgets = WidgetLayout.Defaults(480, 480) };
+var widget = widgets.Widgets[2]; widget.ValueFormat = "0.0";
+Check(WidgetLayout.Format(widget, Tele(52.25)) == "52.3°", "numeric widget format uses invariant culture");
+Check(WidgetLayout.Format(widget, Tele(null)) == "—°", "missing sensor placeholder");
+Check(WidgetLayout.Format(widget, Tele(double.NaN)) == "—°", "NaN never displayed as a reading");
+widget.Source = WidgetSource.FanRpm; widget.Port = 2; widget.TextTemplate = "Fan {value}"; widget.ValueFormat = "0";
+Check(WidgetLayout.Format(widget, Tele() with { Fans = [new(2, 1234, 60)] }) == "Fan 1234", "fan port source binding");
+Check(WidgetLayout.Format(widget, Tele()) == "Fan —", "missing fan placeholder");
+widget.Source = WidgetSource.GpuHotSpotTemperature;
+Check(WidgetLayout.Format(widget, Tele() with { GpuHotSpotTemperature = 83 }) == "Fan 83", "hotspot is a separate display source");
+widget.Source = WidgetSource.Text; widget.TextTemplate = "literal {value}";
+Check(WidgetLayout.Format(widget, Tele()) == "literal {value}", "text source never evaluates placeholders");
+widget.Source = WidgetSource.Clock; widget.TextTemplate = "{value}"; widget.ValueFormat = "HH:mm:ss";
+Check(WidgetLayout.Format(widget, Tele()) == now.LocalDateTime.ToString("HH:mm:ss"), "clock uses snapshot time");
+widget.Width = 481; Throws(() => WidgetLayout.Validate(widgets, 480, 480), "off-canvas geometry rejected"); widget.Width = 360;
+widget.Foreground = "not-a-color"; Throws(() => WidgetLayout.Validate(widgets, 480, 480), "bad widget color rejected"); widget.Foreground = "FFFFFF";
+widget.FontSize = float.PositiveInfinity; Throws(() => WidgetLayout.Validate(widgets, 480, 480), "infinite font rejected"); widget.FontSize = 36;
+widget.Port = 6; Throws(() => WidgetLayout.Validate(widgets, 480, 480), "invalid source port rejected"); widget.Port = 1;
+widget.ValueFormat = "%"; Throws(() => WidgetLayout.Validate(widgets, 480, 480), "invalid clock format rejected"); widget.ValueFormat = "HH:mm:ss";
+widgets.Widgets[1].Id = widget.Id; Throws(() => WidgetLayout.Validate(widgets, 480, 480), "duplicate widget ID rejected"); widgets.Widgets[1].Id = Guid.NewGuid().ToString("N");
+widgets.Widgets = Enumerable.Range(0, 41).Select(_ => new LcdWidget()).ToList(); Throws(() => WidgetLayout.Validate(widgets, 480, 480), "widget count bounded");
+var rotated = new DisplaySettings { Widgets = WidgetLayout.Defaults(480, 128), Rotation = 90 };
+WidgetLayout.Reframe(rotated, 480, 128, 128, 480); WidgetLayout.Validate(rotated, 480, 128); Check(true, "rotation reframes widgets into portrait canvas");
+settings = new(); settings.Aio = new() { UseCustomLayout = true, Widgets = WidgetLayout.Defaults(480, 480) };
+try
+{
+    SettingsStore.Save(path, settings); var roundtrip = SettingsStore.Load(path);
+    Check(roundtrip.Aio.Widgets.Count == 6 && roundtrip.Aio.UseCustomLayout && roundtrip.Panel.Widgets.Count == 0, "independent LCD widget profile roundtrip");
+    roundtrip.Aio.Widgets[0].Foreground = "112233";
+    Check(settings.Aio.Widgets[0].Foreground != "112233", "roundtrip isolates widget edits");
+}
+finally { File.Delete(path); Directory.Delete(Path.GetDirectoryName(path)!); }
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");

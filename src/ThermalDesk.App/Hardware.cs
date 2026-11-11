@@ -139,6 +139,17 @@ internal sealed class FanController : IDisposable
         }
         throw new IOException($"No matching telemetry for port {port}.");
     }
+    // Used only by the explicitly requested, attended acceptance test. Ordinary
+    // live-session shutdown retains the conservative 100% policy in Dispose.
+    public FanReading RestoreAcceptanceDuty(int port, int originalDuty)
+    {
+        link.Write(Protocols.SetDuty(port, originalDuty));
+        Thread.Sleep(1500);
+        var reading = Read(port);
+        if (reading.Duty != originalDuty) throw new IOException("Original duty was not confirmed; keeping the port managed for safe disposal.");
+        managed.Remove(port);
+        return reading;
+    }
     public void Dispose()
     {
         // USB controller has no documented BIOS hand-back command. Leave managed ports at 100%.

@@ -9,7 +9,12 @@ public enum TemperatureSource { Cpu, Gpu, Maximum }
 public enum DisplayContent { Dashboard, Image, Screen }
 public sealed record CurvePoint(double Temperature, double Duty);
 public sealed record Telemetry(DateTimeOffset Time, double? CpuTemperature, double? GpuTemperature,
-    double? CpuLoad, double? GpuLoad, double? MemoryUsedPercent, string Warning = "");
+    double? CpuLoad, double? GpuLoad, double? MemoryUsedPercent, string Warning = "")
+{
+    public double? GpuHotSpotTemperature { get; init; }
+    public double? GpuMemoryTemperature { get; init; }
+    public IReadOnlyList<FanReading> Fans { get; init; } = [];
+}
 public sealed record FanReading(int Port, int Rpm, int Duty);
 
 public sealed class PortSettings
@@ -33,6 +38,10 @@ public sealed class DisplaySettings
     public int Brightness { get; set; } = 70;
     public bool Overlay { get; set; } = true;
     public int FramesPerSecond { get; set; } = 1;
+    public bool UseCustomLayout { get; set; }
+    public string BackgroundColor { get; set; } = "0A111D";
+    public List<LcdWidget> Widgets { get; set; } = [];
+    public DisplaySettings Copy() => JsonSerializer.Deserialize<DisplaySettings>(JsonSerializer.Serialize(this, Settings.JsonOptions), Settings.JsonOptions)!;
 }
 public sealed class Settings
 {
@@ -75,6 +84,8 @@ public sealed class Settings
             if (d.Enabled && d.Content == DisplayContent.Image && !File.Exists(d.MediaPath))
                 throw new ArgumentException("Selected image does not exist.");
         }
+        WidgetLayout.Validate(Panel, 480, 128);
+        WidgetLayout.Validate(Aio, 480, 480);
         if (CoolingEnabled && (!CoolingWiringConfirmed || Ports.All(p => p.Mode == ControlMode.Preserve)))
             throw new ArgumentException("Cooling requires confirmed wiring and at least one configured port.");
     }

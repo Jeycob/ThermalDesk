@@ -29,6 +29,48 @@ internal static class HardwareChecks
                 if (!available) exit = 2;
                 report["usbOpened"] = false;
             }
+            else if (mode == "--fan-curve-acceptance")
+            {
+                if (Engine.Conflicts().Length != 0) throw new InvalidOperationException("Close TT and other controllers before the attended test.");
+                using var monitor = new Monitoring();
+                static void GuardTemperature(Telemetry t)
+                {
+                    if (t.CpuTemperature is not (>= 5 and < 85) || t.GpuTemperature is not (>= 5 and < 85))
+                        throw new InvalidOperationException("Valid CPU/GPU core temperatures below 85 C are required; test aborted.");
+                }
+                GuardTemperature(monitor.Read());
+                using var controller = new FanController("");
+                var original = controller.Read(1);
+                if (original.Rpm <= 0 || original.Duty is < 30 or > 100) throw new InvalidOperationException("Port 1 baseline is not a running fan at a valid duty.");
+                report["baseline"] = original;
+                report["fanSpeedWrites"] = true;
+                report["testedPort"] = 1;
+                var stages = new List<object>();
+                bool safeToRestore = false;
+                try
+                {
+                    foreach (int startDuty in new[] { 60, 80 })
+                    {
+                        var port = new PortSettings { Port = 1, Role = PortRole.Fan, Mode = ControlMode.Curve, Source = TemperatureSource.Cpu,
+                            Curve = [new(30, startDuty), new(80, Math.Min(startDuty + 20, 100))] };
+                        var telemetry = monitor.Read(); GuardTemperature(telemetry);
+                        int target = Math.Max(original.Duty, new FanSafety().Evaluate(port, telemetry, DateTimeOffset.UtcNow, 2).Duty!.Value);
+                        controller.SetDuty(1, target);
+                        for (int i = 0; i < 4; i++) { Thread.Sleep(1000); GuardTemperature(monitor.Read()); }
+                        var reading = controller.Read(1);
+                        stages.Add(new { Curve = port.Curve, RequestedDuty = target, Reading = reading, telemetry.CpuTemperature, telemetry.GpuTemperature });
+                        if (reading.Duty != target || reading.Rpm <= 0) throw new IOException("Fan telemetry did not confirm the requested curve duty.");
+                    }
+                    GuardTemperature(monitor.Read()); safeToRestore = true;
+                }
+                finally
+                {
+                    report["stages"] = stages;
+                    if (safeToRestore) report["restored"] = controller.RestoreAcceptanceDuty(1, original.Duty);
+                    else report["restorePolicy"] = "Test failed: managed port requested to run at 100% on disposal; restore TT before unattended use.";
+                }
+                report["commands"] = "Attended port-1 curve test; never below original duty, then original duty restored and confirmed. No other port, RGB or pump command.";
+            }
             else
             {
                 var conflicts = Engine.Conflicts();

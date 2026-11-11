@@ -18,7 +18,7 @@ internal sealed class FrameRenderer : IDisposable
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-            g.Clear(Color.FromArgb(10, 17, 29));
+            g.Clear(ParseColor(settings.BackgroundColor));
             if (settings.Content == DisplayContent.Image)
             {
                 var info = new FileInfo(settings.MediaPath);
@@ -44,10 +44,32 @@ internal sealed class FrameRenderer : IDisposable
                 DrawFit(g, capture, w, h);
             }
             if (settings.Content == DisplayContent.Dashboard || settings.Overlay)
-                DrawMetrics(g, t, w, h, settings.Content != DisplayContent.Dashboard);
+            {
+                if (settings.UseCustomLayout) DrawWidgets(g, t, settings.Widgets);
+                else DrawMetrics(g, t, w, h, settings.Content != DisplayContent.Dashboard);
+            }
         }
         canvas.RotateFlip(settings.Rotation switch { 90 => RotateFlipType.Rotate90FlipNone, 180 => RotateFlipType.Rotate180FlipNone, 270 => RotateFlipType.Rotate270FlipNone, _ => RotateFlipType.RotateNoneFlipNone });
         return (Bitmap)canvas.Clone();
+    }
+    internal static Color ParseColor(string value) => ColorTranslator.FromHtml("#" + value.TrimStart('#'));
+    private static void DrawWidgets(Graphics g, Telemetry t, IEnumerable<LcdWidget> widgets)
+    {
+        foreach (var widget in widgets)
+        {
+            var state = g.Save();
+            try
+            {
+                var box = new Rectangle(widget.X, widget.Y, widget.Width, widget.Height);
+                g.SetClip(box);
+                if (widget.Background.Length > 0) { using var bg = new SolidBrush(ParseColor(widget.Background)); g.FillRectangle(bg, box); }
+                using var ink = new SolidBrush(ParseColor(widget.Foreground));
+                using var font = new Font(widget.FontFamily, widget.FontSize, widget.Bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
+                using var format = new StringFormat { Alignment = widget.Alignment switch { WidgetAlignment.Left => StringAlignment.Near, WidgetAlignment.Right => StringAlignment.Far, _ => StringAlignment.Center }, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+                g.DrawString(WidgetLayout.Format(widget, t), font, ink, box, format);
+            }
+            finally { g.Restore(state); }
+        }
     }
     private static void DrawFit(Graphics g, Image image, int w, int h)
     {

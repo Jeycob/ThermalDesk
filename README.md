@@ -24,7 +24,7 @@ No existing TT installation, startup task, driver, or profile is automatically c
 |---|---|---|
 | `264A:233D` | 3.9-inch 480×128 LCD, MI_00 command + MI_01 frame channels | Protocol/unit tested; physical-device test pending |
 | `264A:2328` | TOUGHLIQUID AX 480×480 LCD | 60-second physical dashboard test passed on firmware 1.0.5.4; other firmware unverified |
-| `264A:232B` | Five-port USB fan controller + direct RGB | Protocol/unit tested; wiring, report descriptors, RPM and real colors must be verified |
+| `264A:232B` | Five-port USB fan controller + direct RGB | Port 1 curve test and all five RPM readbacks passed; RGB colors/unattended operation unverified |
 
 Unknown IDs and unexpected report lengths are rejected, not guessed. Multiple physical controllers require explicit selection. HKC LCD firmware is not supported. Physical testing is necessary; a successful build is not a safety certification.
 
@@ -35,9 +35,13 @@ The AX firmware replied as 1.0.5.4. A five-second test did not receive physical
 confirmation. The repeated 60-second test with continuous heartbeat and an initial
 status poll **passed**: the operator saw the dashboard and its updating clock.
 This does not establish which of those changes resolved the earlier ambiguity.
-CPU temperature is unavailable without the missing supported sensor-driver setup.
+After an approved installation of official signed PawnIO 2.2.0, elevated sensor
+checks read CPU temperature successfully. GPU core, hotspot and memory temperature
+are separate sources; hotspot is not used as the GPU-core safety temperature.
 Zero-valued sentinel temperatures are rejected, not shown as real readings.
-TT RGB Plus was restored after the check. ThermalDesk has not replaced live cooling.
+An attended port-1 curve test passed: 30% / 429 RPM → 78% / 1577 RPM → 98% / 1974 RPM.
+Original 30% duty was restored and confirmed; TT was restarted. Other ports were
+not speed-controlled. ThermalDesk has not replaced unattended cooling.
 The round dashboard labels have been enlarged following operator feedback; their
 new physical size has not yet been confirmed on the target LCD.
 
@@ -47,6 +51,7 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 
 - CPU/GPU temperature and load, memory usage, and app CPU/RAM/thread/handle counters.
 - Two independent LCDs: telemetry dashboard, image/GIF, or primary-screen mirroring; rotation, brightness, overlays, 1–10 FPS.
+- Native per-LCD widget editor: drag/resize, numeric bounds, font picker, size, bold, custom text, colors, alignment and sensor bindings.
 - Image/GIF fitting preserves aspect ratio. GIF frames are sampled at the configured refresh rate; no video decoder runs in the background.
 - Per-port Preserve / Fixed / Curve cooling, fan/pump roles, minimum speeds, sensor selection, RPM feedback.
 - Per-port static RGB with a selectable color and LED count. A bounded keepalive maintains direct lighting.
@@ -72,6 +77,23 @@ Managed channels:
 Some CPU sensors require administrator rights and a supported LibreHardwareMonitor/PawnIO installation. ThermalDesk does not install drivers, turn off Defender, disable driver protections or fall back to an unsafe unverified driver. If CPU temperature is unavailable, fix sensor access before using curves; the app requests safe duty meanwhile.
 
 ## Profiles and privacy
+
+### Customize the LCDs
+
+1. Open **Displays → Edit widgets…** under the correct device.
+2. Select a widget on the canvas or in the list. Drag to move; drag the bottom-right handle to resize. Arrow keys move 1 pixel; Shift moves 10.
+3. Change **Source**, **Text**, **ValueFormat**, geometry, font and colors in the properties panel. **Font…** opens the font picker. Transparent background leaves the canvas/image visible.
+4. Text such as `CPU {value} °C` inserts the selected sensor. Numeric formats: `0`, `0.0`. Clock: `HH:mm:ss`. Date: `yyyy-MM-dd`. No expressions or code are evaluated. Missing sensors show `—`.
+5. Sources: CPU/GPU core, GPU hotspot/memory temperature, CPU/GPU load, RAM usage, clock/date and port 1–5 fan RPM/duty. Fan data requires an active controller session; preview does not poll hardware.
+6. **Add / Duplicate / Delete** manage widgets; **Back / Front** change overlap order. **Canvas color…** changes the background. **Export PNG…** saves a full-resolution frame.
+7. **Apply layout → Save profile**. Click **Preview** to restart simulated rendering with the new design. Live changes require stopping and explicitly confirming a new live session; editing never silently restarts fans or writes USB.
+
+Layouts are independent for the 480×128 panel and 480×480 AX LCD. Coordinates are
+before rotation; orientation changes reframe the layout. The circle guide shows
+the round LCD crop. Limits: 40 widgets/display, fonts 6–120 pixels. Long text clips
+to its box. Cancel leaves input settings unchanged; Defaults resets only that LCD.
+
+### Saved settings
 
 Settings: `%LOCALAPPDATA%\ThermalDesk\settings.json`. Save/import changes are applied on the next session start. A saved profile **never auto-starts live control**.
 
@@ -109,6 +131,9 @@ Explicit bounded acceptance checks (use full output paths):
 # Operator must observe the physical LCD during this 60-second test.
 # Changes LCD brightness/image only; keep fan settings untouched and restore TT afterward.
 .\ThermalDesk.exe --aio-display-check C:\path\display-report.json
+
+# Explicit attended port-1-only curve test; TT closed, known wiring required.
+.\ThermalDesk.exe --fan-curve-acceptance C:\path\fan-curve-report.json
 ```
 
 An error-free USB transfer does not prove the physical image is visible. Operator
@@ -118,9 +143,10 @@ Render the simulated UI without opening devices:
 
 ```powershell
 .\ThermalDesk.exe --render-preview preview.png
+.\ThermalDesk.exe --widget-check C:\path\widget-test-output
 ```
 
-Tests cover packet boundaries/reassembly, hardware response validation, cooling decisions, stale/invalid sensors, pump floor, hysteresis, configuration validation and profile persistence. They do not exercise a physical controller. See `VALIDATION.txt` for the actual build/test/hardware status of this release.
+Tests cover protocol boundaries, cooling safety, sensors, profile persistence, widget formatting/bounds, independent layouts, UI editing actions and repeated rendering. Automated tests do not exercise hardware. See `VALIDATION.txt` for actual acceptance status.
 
 ## Troubleshooting
 

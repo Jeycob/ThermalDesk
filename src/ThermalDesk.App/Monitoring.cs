@@ -26,7 +26,11 @@ internal sealed class Monitoring : IDisposable
             return a.Length == 0 ? null : a.Max();
         }
         var cpuRaw = Maximum(x => x.Kind == HardwareType.Cpu && x.Sensor.SensorType == SensorType.Temperature);
-        var gpuRaw = Maximum(x => x.Kind is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel && x.Sensor.SensorType == SensorType.Temperature);
+        static bool IsGpuTemperature((HardwareType Kind, ISensor Sensor) x) => x.Kind is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel && x.Sensor.SensorType == SensorType.Temperature;
+        var gpuRaw = Maximum(x => IsGpuTemperature(x) && x.Sensor.Name.Contains("Core", StringComparison.OrdinalIgnoreCase))
+            ?? Maximum(x => IsGpuTemperature(x) && !x.Sensor.Name.Contains("Hot", StringComparison.OrdinalIgnoreCase) && !x.Sensor.Name.Contains("Memory", StringComparison.OrdinalIgnoreCase));
+        var gpuHotSpot = Maximum(x => IsGpuTemperature(x) && x.Sensor.Name.Contains("Hot", StringComparison.OrdinalIgnoreCase));
+        var gpuMemory = Maximum(x => IsGpuTemperature(x) && x.Sensor.Name.Contains("Memory", StringComparison.OrdinalIgnoreCase));
         // Unsupported kernel access can expose a zero-valued sentinel sensor.
         // Never present that as a real reading or silently enable a normal fan curve.
         double? cpu = cpuRaw is >= 5 and <= 115 ? cpuRaw : null;
@@ -35,7 +39,8 @@ internal sealed class Monitoring : IDisposable
         var gpuLoad = Maximum(x => x.Kind is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel && x.Sensor.SensorType == SensorType.Load && x.Sensor.Name.Contains("Core", StringComparison.OrdinalIgnoreCase));
         var mem = Maximum(x => x.Kind == HardwareType.Memory && x.Sensor.SensorType == SensorType.Load);
         return new(DateTimeOffset.UtcNow, cpu, gpu, cpuLoad, gpuLoad, mem,
-            cpu.HasValue ? "" : "CPU temperature unavailable. Check supported LHM/PawnIO setup; cooling falls back to 100%.");
+            cpu.HasValue ? "" : "CPU temperature unavailable. Check supported LHM/PawnIO setup; cooling falls back to 100%.")
+        { GpuHotSpotTemperature = gpuHotSpot, GpuMemoryTemperature = gpuMemory };
     }
     public void Dispose() => computer.Close();
 }
