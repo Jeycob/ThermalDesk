@@ -8,6 +8,7 @@ public enum PortRole { Unknown, Fan, Pump }
 public enum TemperatureSource { Cpu, Gpu, Maximum }
 public enum DisplayContent { Dashboard, Image, Screen }
 public enum RgbEffect { Static, Breathing, Blink, ColorCycle, RainbowWave, Temperature }
+public enum FanPreset { Silent, Custom, Full }
 public sealed record CurvePoint(double Temperature, double Duty);
 public sealed record Telemetry(DateTimeOffset Time, double? CpuTemperature, double? GpuTemperature,
     double? CpuLoad, double? GpuLoad, double? MemoryUsedPercent, string Warning = "")
@@ -21,6 +22,7 @@ public sealed record FanReading(int Port, int Rpm, int Duty);
 public sealed class PortSettings
 {
     public int Port { get; set; }
+    public string Name { get; set; } = "";
     public PortRole Role { get; set; } = PortRole.Unknown;
     public ControlMode Mode { get; set; } = ControlMode.Preserve;
     public TemperatureSource Source { get; set; } = TemperatureSource.Maximum;
@@ -33,7 +35,32 @@ public sealed class PortSettings
     public int RgbBrightness { get; set; } = 70;
     public double RgbPeriodSeconds { get; set; } = 4;
     public List<CurvePoint> Curve { get; set; } = [new(30, 40), new(50, 50), new(65, 70), new(75, 90), new(80, 100)];
+    public List<CurvePoint> CustomCurveBackup { get; set; } = [];
     public PortSettings Copy() => JsonSerializer.Deserialize<PortSettings>(JsonSerializer.Serialize(this, Settings.JsonOptions), Settings.JsonOptions)!;
+}
+public static class FanPresets
+{
+    public static FanPreset Identify(PortSettings p) => p.Mode == ControlMode.Fixed && p.FixedDuty == 100 ? FanPreset.Full
+        : p.Mode == ControlMode.Curve && p.Curve.SequenceEqual(SilentCurve) ? FanPreset.Silent : FanPreset.Custom;
+    private static readonly CurvePoint[] SilentCurve = [new(20, 30), new(60, 30), new(70, 40), new(80, 60), new(85, 100)];
+    public static void Apply(PortSettings p, FanPreset preset)
+    {
+        if (!Enum.IsDefined(preset)) throw new ArgumentException("Unknown preset.");
+        // Never infer wiring or silently convert a pump/unknown port into a fan.
+        if (p.Role == PortRole.Unknown) throw new ArgumentException("Identify the wiring role first.");
+        if (preset == FanPreset.Full) { p.Mode = ControlMode.Fixed; p.FixedDuty = 100; }
+        else if (preset == FanPreset.Silent)
+        {
+            if (Identify(p) != FanPreset.Silent && p.CustomCurveBackup.Count == 0) p.CustomCurveBackup = p.Curve.ToList();
+            p.Mode = ControlMode.Curve; p.Curve = SilentCurve.ToList();
+            p.MinimumDuty = Math.Max(p.Role == PortRole.Pump ? 60 : 30, p.MinimumDuty);
+        }
+        else
+        {
+            p.Mode = ControlMode.Curve;
+            if (p.CustomCurveBackup.Count > 0) { p.Curve = p.CustomCurveBackup.ToList(); p.CustomCurveBackup.Clear(); }
+        }
+    }
 }
 public sealed class DisplaySettings
 {
@@ -74,6 +101,7 @@ public sealed class Settings
         if (RgbEnabled && Ports.All(p => !p.Rgb)) throw new ArgumentException("Select at least one RGB port.");
         foreach (var p in Ports)
         {
+            if (p.Name is null || p.Name.Length > 40 || p.Name.Any(char.IsControl)) throw new ArgumentException("Port names must be at most 40 printable characters.");
             if (!Enum.IsDefined(p.Role) || !Enum.IsDefined(p.Mode) || !Enum.IsDefined(p.Source)) throw new ArgumentException("Invalid port setting.");
             if (!Enum.IsDefined(p.RgbEffect) || p.RgbBrightness is < 0 or > 100 || !double.IsFinite(p.RgbPeriodSeconds) || p.RgbPeriodSeconds is < 1 or > 60 || !WidgetLayout.IsColor(p.RgbColor, true))
                 throw new ArgumentException($"Port {p.Port}: invalid RGB effect, color, brightness (0–100%) or period (1–60 seconds).");
@@ -83,9 +111,13 @@ public sealed class Settings
                 throw new ArgumentException($"Identify fan/pump wiring on port {p.Port} before controlling it.");
             if (p.Curve.Count is < 2 or > 20 || p.Curve.Any(x => !double.IsFinite(x.Temperature) || !double.IsFinite(x.Duty) || x.Temperature is < 0 or > 100 || x.Duty is < 30 or > 100))
                 throw new ArgumentException($"Port {p.Port}: invalid curve.");
+            if (p.CustomCurveBackup is null || p.CustomCurveBackup.Count > 20 ||
+                (p.CustomCurveBackup.Count > 0 && (p.CustomCurveBackup.Count < 2 || p.CustomCurveBackup.Any(x => !double.IsFinite(x.Temperature) || !double.IsFinite(x.Duty) || x.Temperature is < 0 or > 100 || x.Duty is < 30 or > 100) ||
+                 p.CustomCurveBackup.Zip(p.CustomCurveBackup.Skip(1)).Any(x => x.Second.Temperature <= x.First.Temperature))))
+                throw new ArgumentException($"Port {p.Port}: invalid saved custom curve.");
             for (int i = 1; i < p.Curve.Count; i++)
-                if (p.Curve[i].Temperature <= p.Curve[i - 1].Temperature || p.Curve[i].Duty < p.Curve[i - 1].Duty)
-                    throw new ArgumentException($"Port {p.Port}: curve must increase in temperature and not decrease in duty.");
+                if (p.Curve[i].Temperature <= p.Curve[i - 1].Temperature)
+                    throw new ArgumentException($"Port {p.Port}: curve temperatures must be strictly increasing.");
         }
         foreach (var d in new[] { Panel, Aio })
         {

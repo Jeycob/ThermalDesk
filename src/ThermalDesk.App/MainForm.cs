@@ -15,6 +15,8 @@ internal sealed class MainForm : Form
     private readonly string configPath;
     private Settings settings;
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
+    private readonly System.Windows.Forms.Timer settingsDelay = new() { Interval = 450 };
+    private string applyHint = "";
     private readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "ThermalDesk" };
     private readonly Label session = new(), resources = new(), cpu = new(), gpu = new(), memory = new();
     private readonly TextBox deviceStatus = new(), log = new(), color = new(), serial = new();
@@ -26,6 +28,7 @@ internal sealed class MainForm : Form
     private readonly NumericUpDown poll = new() { Minimum = 1, Maximum = 10, Width = 70 };
     private readonly DisplayEditor panelEditor, aioEditor;
     private readonly FrameRenderer panelRenderer = new(), aioRenderer = new();
+    private readonly Button liveButton;
     private bool busy, exiting, smokeMode;
     private DateTime lastResource = DateTime.UtcNow;
     private readonly DateTime resourceWarmup = DateTime.UtcNow.AddSeconds(5);
@@ -51,9 +54,9 @@ internal sealed class MainForm : Form
         shell.Controls.Add(new Label { Text = "THERMALDESK  /  Hardware, without the overhead", ForeColor = Accent, Font = new Font(Font.FontFamily, 21, FontStyle.Bold), AutoSize = true, Padding = new Padding(0, 10, 0, 0) }, 0, 0);
         var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         tools.Controls.Add(Button("Preview", async () => await Switch(false)));
-        tools.Controls.Add(Button("Start live control", async () => await Switch(true), true));
+        liveButton = Button("Start live control", async () => await Switch(true), true); tools.Controls.Add(liveButton);
         tools.Controls.Add(Button("Stop", async () => await Run(async () => await engine.Stop())));
-        tools.Controls.Add(Button("Save profile", () => { settings = ReadSettings(); SettingsStore.Save(configPath, settings); Info("Profile saved. Changes apply when the session is restarted."); }));
+        tools.Controls.Add(Button("Save profile", () => { settings = ReadSettings(); SettingsStore.Save(configPath, settings); Info("Profile saved. Valid curve, RGB and widget edits apply automatically in an active live session."); }));
         tools.Controls.Add(Button("Import / export", ProfileMenu));
         tools.Controls.Add(Button("Start at sign-in", ConfigureStartup));
         if (!StartupManager.Elevated) tools.Controls.Add(Button("Restart as admin", async () => await RestartElevated()));
@@ -80,13 +83,15 @@ internal sealed class MainForm : Form
         var coolingLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, Padding = new Padding(12) };
         coolingLayout.RowStyles.Add(new(SizeType.Absolute, 65)); coolingLayout.RowStyles.Add(new(SizeType.Absolute, 64)); coolingLayout.RowStyles.Add(new(SizeType.Percent, 100)); coolingLayout.RowStyles.Add(new(SizeType.Absolute, 80));
         coolingPage.Controls.Add(coolingLayout);
-        coolingLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Color.FromArgb(255, 194, 100), Text = "Cooling is safety-critical. Identify physical port wiring first. Software cannot guarantee protection after a crash, USB loss, or before Windows sign-in.\nPreserve = no fan-speed writes. Managed ports are requested to run at 100% on normal stop / detected failure." }, 0, 0);
+        coolingLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Color.FromArgb(255, 194, 100), Text = "Identify wiring and keep independent thermal protection. Software cannot guarantee protection after a crash, USB loss or before sign-in.\nCurve/RGB changes apply automatically. Stop restores captured duties, not forced full speed. This is not BIOS hand-back." }, 0, 0);
         var flags = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
         cooling.AutoSize = wiring.AutoSize = rgb.AutoSize = true; flags.Controls.AddRange([cooling, rgb, monitorFans, wiring]); coolingLayout.Controls.Add(flags, 0, 1);
         BuildPorts(); coolingLayout.Controls.Add(ports, 0, 2);
         var extras = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 8, 0, 0) };
         color.Width = 100; serial.Width = 190;
         extras.Controls.AddRange([new Label { Text = "RGB hex", AutoSize = true }, color, Button("Pick color", PickColor), new Label { Text = "Controller serial (optional)", AutoSize = true }, serial]);
+        extras.Controls.Add(new Label { Text = "Managed fans:", AutoSize = true });
+        foreach (var preset in Enum.GetValues<FanPreset>()) extras.Controls.Add(Button(preset.ToString(), () => ApplyFanPreset(preset)));
         coolingLayout.Controls.Add(extras, 0, 3);
         var displays = Page(tabs, "Displays");
         var displayLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(12) };
@@ -101,6 +106,11 @@ internal sealed class MainForm : Form
         var aboutText = new TextBox(); ConfigureText(aboutText); aboutText.Text = $"ThermalDesk {typeof(MainForm).Assembly.GetName().Version?.ToString(3)} — independent experimental controller\r\n\r\nDevices: 264A:233D panel, 264A:2328 AX LCD, 264A:232B five-port fan controller. Unknown descriptors/firmware are rejected.\r\n\r\nNormal launch: Preview, no hardware access. Enable the correct device under Displays before Start live control. CPU sensors on this PC require administrator access and the supported PawnIO installation.\r\n\r\nSaved automatic-live startup is opt-in. Shift bypasses it. Conflicting vendor apps block live access and are never killed. This is not a before-login cooling service.\r\n\r\nDuty % is a controller request, not watts or RPM. PWM/DC electrical switching is not exposed by the verified protocol. BIOS pump control remains unchanged.\r\n\r\nA crash, USB loss or frozen process cannot be made safe by an exit handler. Keep independent firmware/BIOS thermal protection. No driver protection, firmware or flash is modified.\r\n\r\nPhysical acceptance is required for LCD images, RGB colors, wiring and cooling. Automated tests are not certification.\r\n\r\nNo PSU/RAM RGB/cloud/firmware updates. No network server. GPL-3.0-or-later; see LICENSE and THIRD-PARTY-NOTICES.txt."; about.Controls.Add(aboutText);
         var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill }; bottom.Controls.Add(new Label { Text = "Sensor interval (s)", AutoSize = true }); poll.Value = initial.PollSeconds; bottom.Controls.Add(poll); resources.AutoSize = true; resources.ForeColor = Muted; bottom.Controls.Add(resources); shell.Controls.Add(bottom, 0, 4);
         cooling.Checked = initial.CoolingEnabled; wiring.Checked = initial.CoolingWiringConfirmed; rgb.Checked = initial.RgbEnabled; monitorFans.Checked = initial.MonitorFanController; color.Text = initial.RgbColor; serial.Text = initial.ControllerSerial;
+        TrackSettingsChanges(cooling); TrackSettingsChanges(wiring); TrackSettingsChanges(rgb); TrackSettingsChanges(monitorFans);
+        TrackSettingsChanges(color); TrackSettingsChanges(serial); TrackSettingsChanges(poll); TrackSettingsChanges(panelEditor); TrackSettingsChanges(aioEditor);
+        ports.CellValueChanged += (_, _) => QueueSettingsApply();
+        panelEditor.SettingsChanged += QueueSettingsApply; aioEditor.SettingsChanged += QueueSettingsApply;
+        settingsDelay.Tick += (_, _) => ApplyPendingSettings();
         tray.ContextMenuStrip = new ContextMenuStrip(); tray.ContextMenuStrip.Items.Add("Open", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
         tray.ContextMenuStrip.Items.Add("Stop hardware control", null, async (_, _) => await Run(async () => await engine.Stop()));
         tray.ContextMenuStrip.Items.Add("Exit", null, (_, _) => { exiting = true; Close(); }); tray.DoubleClick += (_, _) => { Show(); Activate(); };
@@ -136,6 +146,11 @@ internal sealed class MainForm : Form
     }
     private void BuildPorts()
     {
+        ports.CellFormatting += (_, e) =>
+        {
+            if (e.ColumnIndex == 0 && e.RowIndex >= 0 && e.Value is int number && portDesign.TryGetValue(number, out var p) && p.Name.Length > 0)
+            { e.Value = $"{number} · {p.Name}"; e.FormattingApplied = true; }
+        };
         ports.Dock = DockStyle.Fill; ports.AllowUserToAddRows = ports.AllowUserToDeleteRows = false; ports.RowHeadersVisible = false; ports.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         ports.BackgroundColor = Surface; ports.BorderStyle = BorderStyle.None; ports.DefaultCellStyle.BackColor = Surface; ports.DefaultCellStyle.ForeColor = Color.White;
         ports.DefaultCellStyle.SelectionBackColor = Color.FromArgb(36, 81, 93); ports.EnableHeadersVisualStyles = false;
@@ -169,13 +184,28 @@ internal sealed class MainForm : Form
         static string Cell(DataGridViewRow r, int i) => Convert.ToString(r.Cells[i].Value, CultureInfo.InvariantCulture) ?? throw new ArgumentException("Missing port value.");
         int port = Convert.ToInt32(row.Cells[0].Value); var p = portDesign[port].Copy();
         p.Role = Enum.Parse<PortRole>(Cell(row, 1)); p.Mode = Enum.Parse<ControlMode>(Cell(row, 2)); p.Source = Enum.Parse<TemperatureSource>(Cell(row, 3)); p.MinimumDuty = Convert.ToInt32(row.Cells[4].Value); p.FixedDuty = Convert.ToInt32(row.Cells[5].Value); p.Rgb = Convert.ToBoolean(row.Cells[6].Value); p.LedCount = Convert.ToInt32(row.Cells[7].Value);
-        p.Curve = Cell(row, 8).Split(';', StringSplitOptions.RemoveEmptyEntries).Select(x => { var pair = x.Split(':'); if (pair.Length != 2) throw new ArgumentException("Curve format: 30:40;50:50;65:70;75:90;80:100"); return new CurvePoint(double.Parse(pair[0], CultureInfo.InvariantCulture), double.Parse(pair[1], CultureInfo.InvariantCulture)); }).ToList(); return p;
+        p.Curve = Cell(row, 8).Split(';', StringSplitOptions.RemoveEmptyEntries).Select(x => { var pair = x.Split(':'); if (pair.Length != 2) throw new ArgumentException("Curve format: 30:40;50:50;65:70;75:90;80:100"); return new CurvePoint(double.Parse(pair[0], CultureInfo.InvariantCulture), double.Parse(pair[1], CultureInfo.InvariantCulture)); }).ToList();
+        if (!p.Curve.SequenceEqual(portDesign[port].Curve)) p.CustomCurveBackup.Clear();
+        return p;
     }
     private Settings ReadSettings()
     {
         ports.EndEdit();
         var s = new Settings { PollSeconds = (int)poll.Value, CoolingEnabled = cooling.Checked, CoolingWiringConfirmed = wiring.Checked, RgbEnabled = rgb.Checked, MonitorFanController = monitorFans.Checked, StartLiveAtSignIn = settings.StartLiveAtSignIn, RgbColor = color.Text.Trim().TrimStart('#'), ControllerSerial = serial.Text.Trim(), Panel = panelEditor.Read(), Aio = aioEditor.Read() };
         s.Ports = ports.Rows.Cast<DataGridViewRow>().Select(ReadPort).ToList(); s.Validate(); return s;
+    }
+    private void ApplyFanPreset(FanPreset preset)
+    {
+        ports.EndEdit();
+        foreach (DataGridViewRow row in ports.Rows)
+        {
+            var p = ReadPort(row);
+            if (p.Role != PortRole.Fan || p.Mode == ControlMode.Preserve) continue;
+            FanPresets.Apply(p, preset); portDesign[p.Port] = p.Copy();
+            row.SetValues(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount,
+                string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));
+        }
+        QueueSettingsApply();
     }
     private async Task Run(Func<Task> action)
     {
@@ -190,13 +220,43 @@ internal sealed class MainForm : Form
             next.ValidateLiveSelection();
             if (next.CoolingEnabled && !StartupManager.Elevated)
                 throw new InvalidOperationException("CPU sensor access on this PC requires administrator rights. Click Restart as admin first. No cooling session was started.");
-            string warning = "Start live control of the enabled devices? Close TT RGB Plus, OpenRGB, Fan Control and SignalRGB first. No application will be closed automatically.";
+            bool updating = engine.Running && engine.Live;
+            string warning = updating ? "Apply curve, RGB and widget settings without restarting the controller? Device/wiring changes require Stop first."
+                : "Start live control of the enabled devices? Close TT RGB Plus, OpenRGB, Fan Control and SignalRGB first. No application will be closed automatically.";
             if (next.CoolingEnabled) warning += "\n\nCooling: you must have verified wiring and independent thermal protection. USB disconnection or a crashed/frozen process cannot guarantee a safe fan speed. Do not use experimental cooling unattended.";
             if (next.Panel.Content == DisplayContent.Screen || next.Aio.Content == DisplayContent.Screen) warning += "\n\nScreen mirroring can display private information on the physical LCD.";
             if (MessageBox.Show(warning, "Confirm live hardware access", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+            if (updating) { engine.ApplyLiveSettings(next); settings = next; return; }
         }
         await engine.Stop(); settings = next; engine.Start(next, live);
     });
+    private void TrackSettingsChanges(Control control)
+    {
+        switch (control)
+        {
+            case CheckBox check: check.CheckedChanged += (_, _) => QueueSettingsApply(); break;
+            case ComboBox combo: combo.SelectedIndexChanged += (_, _) => QueueSettingsApply(); break;
+            case NumericUpDown number: number.ValueChanged += (_, _) => QueueSettingsApply(); break;
+            case TextBox text when !text.ReadOnly: text.TextChanged += (_, _) => QueueSettingsApply(); break;
+        }
+        foreach (Control child in control.Controls) TrackSettingsChanges(child);
+    }
+    private void QueueSettingsApply()
+    { if (smokeMode || exiting) return; settingsDelay.Stop(); settingsDelay.Start(); }
+    private void ApplyPendingSettings()
+    {
+        settingsDelay.Stop();
+        if (busy || exiting) { if (!exiting) settingsDelay.Start(); return; }
+        try
+        {
+            var next = ReadSettings();
+            if (engine.Running && engine.Live) engine.ApplyLiveSettings(next);
+            settings = next; SettingsStore.Save(configPath, next);
+            applyHint = engine.Live ? "Changes applied automatically · no controller restart" : "Profile saved · preview updated";
+            RefreshData();
+        }
+        catch (Exception error) { applyHint = "Pending · " + error.Message; RefreshData(); }
+    }
     private void RefreshData()
     {
         var t = engine.Latest;
@@ -207,6 +267,10 @@ internal sealed class MainForm : Form
         memory.Text = $"MEMORY\n{t.MemoryUsedPercent:0}% used";
         session.Text = engine.Cancelled ? "SESSION CANCELLED · see log · press Stop before reconnecting" : engine.Running ? (engine.Live ? "LIVE · hardware session" : "PREVIEW · simulated data · hardware writes disabled") : "STOPPED";
         session.ForeColor = engine.Live ? Color.FromArgb(255, 194, 100) : Accent;
+        liveButton.Text = engine.Running && engine.Live ? "Live · automatic" : "Start live control";
+        liveButton.Enabled = !engine.Running || !engine.Live;
+        if (engine.ControllerFault) session.Text = "CONTROLLER FAULT · release requested · restore vendor control · see log";
+        if (applyHint.Length > 0) session.Text += " · " + applyHint;
         deviceStatus.Text = string.Join(Environment.NewLine + Environment.NewLine, engine.Status.OrderBy(x => x.Key).Select(x => x.Key + "\r\n" + x.Value)) + "\r\n\r\n" + string.Join("\r\n", engine.Fans.Values.OrderBy(x => x.Port).Select(x => $"Port {x.Port}: {x.Rpm} RPM / reported {x.Duty}%"));
         log.Text = string.Join(Environment.NewLine, engine.Logs);
         try { var a = panelRenderer.Render(t, settings.Panel, 480, 128); var old = panelPreview.Image; panelPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · panel preview: " + e.Message; }
@@ -288,7 +352,7 @@ internal sealed class MainForm : Form
         e.Cancel = true;
         if (busy) return;
         busy = true;
-        try { await engine.Stop(); exiting = true; refresh.Stop(); tray.Visible = false; tray.Dispose(); panelRenderer.Dispose(); aioRenderer.Dispose(); panelPreview.Image?.Dispose(); aioPreview.Image?.Dispose(); Close(); }
+        try { await engine.Stop(); exiting = true; refresh.Stop(); settingsDelay.Stop(); settingsDelay.Dispose(); tray.Visible = false; tray.Dispose(); panelRenderer.Dispose(); aioRenderer.Dispose(); panelPreview.Image?.Dispose(); aioPreview.Image?.Dispose(); Close(); }
         catch (Exception error) { Error(error); } finally { busy = false; }
     }
     public void RenderPreview(string path)
@@ -331,10 +395,21 @@ internal sealed class MainForm : Form
     }
     private static void Error(Exception e) => MessageBox.Show(e.Message, "ThermalDesk", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     private static void Info(string text) => MessageBox.Show(text, "ThermalDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    internal int ExerciseAutomaticSettingsForTest()
+    {
+        smokeMode = true; poll.Value = 3; ApplyPendingSettings();
+        if (SettingsStore.Load(configPath).PollSeconds != 3 || engine.Live) throw new InvalidOperationException("Automatic preview persistence failed or opened hardware.");
+        cooling.Checked = true; ApplyPendingSettings();
+        if (!applyHint.StartsWith("Pending") || SettingsStore.Load(configPath).CoolingEnabled) throw new InvalidOperationException("Invalid automatic change was persisted.");
+        settingsDelay.Stop(); return 2;
+    }
+    protected override void Dispose(bool disposing)
+    { if (disposing) { settingsDelay.Dispose(); refresh.Dispose(); } base.Dispose(disposing); }
 }
 
 internal sealed class DisplayEditor : GroupBox
 {
+    public event Action? SettingsChanged;
     private readonly CheckBox enabled = new() { Text = "Enable this LCD", AutoSize = true }, overlay = new() { Text = "Metrics overlay", AutoSize = true };
     private readonly CheckBox custom = new() { Text = "Use custom widget layout", AutoSize = true };
     private readonly ComboBox content = new() { DropDownStyle = ComboBoxStyle.DropDownList }, rotation = new() { DropDownStyle = ComboBoxStyle.DropDownList };
@@ -364,7 +439,7 @@ internal sealed class DisplayEditor : GroupBox
             try
             {
                 using var editor = new WidgetDesignerForm(title, Read(), width, height, telemetry);
-                if (editor.ShowDialog(FindForm()) == DialogResult.OK) { design = editor.Result; custom.Checked = true; overlay.Checked = true; }
+                if (editor.ShowDialog(FindForm()) == DialogResult.OK) { design = editor.Result; custom.Checked = true; overlay.Checked = true; SettingsChanged?.Invoke(); }
             }
             catch (Exception error) { MessageBox.Show(error.Message, "Widget designer", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
         };

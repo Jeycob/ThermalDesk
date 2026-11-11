@@ -123,3 +123,55 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   off by default. It does not open a network listener or contain credentials.
 - Automated core count: 743. App checks include empty-selection and launch-policy
   cases. New physical LCD/RGB/fan-session acceptance is tracked separately.
+
+0.3.2 MIXED-CONTROLLER REPAIR / TT CURVES / RADIAL GAUGES
+- The operator reported repeated fan speed bursts and gray/color RGB flashing.
+  Logs confirmed repeated telemetry failures and controller reconnects. These
+  were real defects; prior fake-controller tests did not model queued RGB ACKs.
+- Reader now skips unrelated ACKs by complete GET header, with a 1200 ms and
+  128-packet bound. Transport failures still fault, never fabricate zero telemetry.
+- Faults latch after safe-duty disposal rather than reopening every five seconds.
+- Curve/RGB/widget edits apply in place without reinitializing hardware. Changes
+  to wiring, enabled devices, managed ports or LCD brightness require Stop.
+- A healthy initial sample is used before taking fan control; missing/stale or
+  critical initial data still requests safe 100% duty.
+- Real 40-second mixed test: 157 RGB frames, 160 skipped ACKs, port 1 held 70%
+  (~1440 RPM), all five feedback channels readable, original duty confirmed back.
+  The first diagnostic exceeded its wrapper timeout because it sampled expensive
+  hardware sensors on every RGB frame; that diagnostic was corrected to reuse
+  sampled telemetry and use wall-clock timing. No passing result claimed for it.
+- Real 90-second five-fan TT-profile test: one controller connection, four live
+  updates (Custom/Full/Custom and lighting), no controller fault, five valid RPM
+  readings. Final CPU ~44.8 C / GPU core 31 C, fan duties 30-32% / ~450-470 RPM.
+- Exact nine TT duty points and location names retained; non-monotonic duty is
+  permitted when temperature points remain strictly ordered. Safety limits take
+  precedence, including critical-core 85 C, so an imported curve is not a bypass.
+- Numeric radial gauges are editable and included in the default round layout.
+  Rendered outputs visually checked; physical appearance of the new ring pending.
+- Chassis LCD 264A:233D was not present in target USB/PnP inventory. A remembered
+  vendor profile is not proof of connection; physical test remains blocked.
+- No BIOS, pump, firmware, driver-protection or vendor startup setting changed.
+- Automated core assertions: 761. Final UI/integration check count is recorded
+  with the release build. Short checks do not establish long-term cooling safety.
+
+0.3.3 QUIET RELEASE POLICY — SUPERSEDES EARLIER FULL-SPEED FALLBACK
+- User explicitly rejected leaving fans at 100% just because a test/session ended
+  or a generic safety fallback was invoked. The original TT controller was
+  restarted with its unchanged quiet curves immediately.
+- Each fan's running duty is captured before the first speed write. Normal close
+  restores that duty, not 100%. RGB-only and monitor-only sessions do not write
+  speed on close. Missing baseline prevents takeover entirely.
+- Missing/stale temperature releases control instead of inventing an emergency
+  full-speed demand. Initial missing readings prevent opening the controller.
+- Real measured critical temperature (85 C) remains a separate emergency case;
+  user-selected Full mode and actual high-temperature curves can still reach 100%.
+- No fixed restored duty is represented as a firmware curve or guaranteed safety.
+  Keep the proven vendor setup active until the revised release is validated.
+- Added fake-HID tests for exact stop restoration, RGB-only close, unavailable
+  baseline and the separate genuine critical-temperature case.
+- Subsequent user instruction: no more live hardware experiments tonight. The
+  original TT Silent settings are left untouched; new work is source/mock-only.
+- Valid UI curve/RGB/widget changes now save/apply automatically after a 450 ms
+  debounce. Device/wiring changes remain pending until explicitly stopped/rearmed.
+  Silent/Custom/Full quick buttons affect managed fans only. Custom restores the
+  retained original custom curve instead of replacing it with Silent permanently.

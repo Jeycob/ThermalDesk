@@ -63,6 +63,17 @@ internal sealed class FrameRenderer : IDisposable
                 var box = new Rectangle(widget.X, widget.Y, widget.Width, widget.Height);
                 g.SetClip(box);
                 if (widget.Background.Length > 0) { using var bg = new SolidBrush(ParseColor(widget.Background)); g.FillRectangle(bg, box); }
+                if (widget.Kind == WidgetKind.RadialGauge)
+                {
+                    float size = Math.Min(box.Width, box.Height) - widget.GaugeThickness - 2;
+                    var arc = new RectangleF(box.X + (box.Width - size) / 2, box.Y + (box.Height - size) / 2, size, size);
+                    using var track = new Pen(ParseColor(widget.GaugeTrackColor), widget.GaugeThickness) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+                    using var progress = new Pen(ParseColor(widget.Foreground), widget.GaugeThickness) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+                    g.DrawArc(track, arc, widget.GaugeStartAngle, widget.GaugeSweepAngle);
+                    if (WidgetLayout.GaugeFraction(widget, t) is > 0 and var fraction)
+                        g.DrawArc(progress, arc, widget.GaugeStartAngle, (float)fraction * widget.GaugeSweepAngle);
+                    if (!widget.GaugeShowText) continue;
+                }
                 using var ink = new SolidBrush(ParseColor(widget.Foreground));
                 using var font = new Font(widget.FontFamily, widget.FontSize, widget.Bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
                 using var format = new StringFormat { Alignment = widget.Alignment switch { WidgetAlignment.Left => StringAlignment.Near, WidgetAlignment.Right => StringAlignment.Far, _ => StringAlignment.Center }, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };

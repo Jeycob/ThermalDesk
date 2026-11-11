@@ -4,12 +4,21 @@ namespace ThermalDesk.Core;
 
 public enum WidgetSource { Text, CpuTemperature, GpuTemperature, GpuHotSpotTemperature, GpuMemoryTemperature, CpuLoad, GpuLoad, MemoryUsedPercent, Clock, Date, FanRpm, FanDuty }
 public enum WidgetAlignment { Left, Center, Right }
+public enum WidgetKind { Text, RadialGauge }
 
 public sealed class LcdWidget
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Widget";
     public WidgetSource Source { get; set; } = WidgetSource.CpuTemperature;
+    public WidgetKind Kind { get; set; }
+    public double GaugeMinimum { get; set; }
+    public double GaugeMaximum { get; set; } = 100;
+    public float GaugeThickness { get; set; } = 12;
+    public float GaugeStartAngle { get; set; } = 135;
+    public float GaugeSweepAngle { get; set; } = 270;
+    public string GaugeTrackColor { get; set; } = "243A49";
+    public bool GaugeShowText { get; set; } = true;
     public int Port { get; set; } = 1;
     public int X { get; set; } = 20;
     public int Y { get; set; } = 20;
@@ -52,13 +61,20 @@ public static class WidgetLayout
         {
             if (w is null || string.IsNullOrWhiteSpace(w.Id) || !ids.Add(w.Id) || w.Id.Length > 80 || string.IsNullOrWhiteSpace(w.Name) || w.Name.Length > 80)
                 throw new ArgumentException("Widgets need unique IDs and a short name.");
-            if (!Enum.IsDefined(w.Source) || !Enum.IsDefined(w.Alignment) || w.Port is < 1 or > 5)
+            if (!Enum.IsDefined(w.Source) || !Enum.IsDefined(w.Alignment) || !Enum.IsDefined(w.Kind) || w.Port is < 1 or > 5)
                 throw new ArgumentException($"{w.Name}: invalid data source, alignment or fan port.");
             if (w.X < 0 || w.Y < 0 || w.Width < 8 || w.Height < 8 || w.Width > width || w.Height > height || w.X > width - w.Width || w.Y > height - w.Height)
                 throw new ArgumentException($"{w.Name}: widget must stay inside the {width}×{height} design canvas (before rotation).");
             if (!float.IsFinite(w.FontSize) || w.FontSize is < 6 or > 120 || string.IsNullOrWhiteSpace(w.FontFamily) || w.FontFamily.Length > 100)
                 throw new ArgumentException($"{w.Name}: font must be 6–120 pixels and have a valid family name.");
             if (!IsColor(w.Foreground) || !IsColor(w.Background, true)) throw new ArgumentException($"{w.Name}: use six-digit hex colors, or an empty background for transparency.");
+            if (!double.IsFinite(w.GaugeMinimum) || !double.IsFinite(w.GaugeMaximum) || w.GaugeMaximum <= w.GaugeMinimum ||
+                !float.IsFinite(w.GaugeThickness) || w.GaugeThickness is < 1 or > 60 ||
+                !float.IsFinite(w.GaugeStartAngle) || w.GaugeStartAngle is < -360 or > 360 ||
+                !float.IsFinite(w.GaugeSweepAngle) || w.GaugeSweepAngle is < 1 or > 360 || !IsColor(w.GaugeTrackColor))
+                throw new ArgumentException($"{w.Name}: invalid radial gauge range, thickness, angle or track color.");
+            if (w.Kind == WidgetKind.RadialGauge && (w.GaugeThickness > Math.Min(w.Width, w.Height) / 3f || w.Source is WidgetSource.Text or WidgetSource.Clock or WidgetSource.Date))
+                throw new ArgumentException($"{w.Name}: a radial gauge needs a numeric source and enough room for its thickness.");
             if (w.TextTemplate is null || w.TextTemplate.Length > 256 || w.ValueFormat is null || w.ValueFormat.Length > 64)
                 throw new ArgumentException($"{w.Name}: text/format is too long.");
             try
@@ -72,7 +88,12 @@ public static class WidgetLayout
     public static string Format(LcdWidget w, Telemetry t)
     {
         if (w.Source == WidgetSource.Text) return w.TextTemplate;
-        double? value = w.Source switch
+        double? value = NumericValue(w, t);
+        string formatted = w.Source is WidgetSource.Clock or WidgetSource.Date ? t.Time.LocalDateTime.ToString(w.ValueFormat, CultureInfo.InvariantCulture)
+            : value.HasValue && double.IsFinite(value.Value) ? value.Value.ToString(w.ValueFormat, CultureInfo.InvariantCulture) : "—";
+        return w.TextTemplate.Replace("{value}", formatted, StringComparison.Ordinal);
+    }
+    public static double? NumericValue(LcdWidget w, Telemetry t) => w.Source switch
         {
             WidgetSource.CpuTemperature => t.CpuTemperature, WidgetSource.GpuTemperature => t.GpuTemperature,
             WidgetSource.GpuHotSpotTemperature => t.GpuHotSpotTemperature, WidgetSource.GpuMemoryTemperature => t.GpuMemoryTemperature,
@@ -80,9 +101,11 @@ public static class WidgetLayout
             WidgetSource.FanRpm => t.Fans.FirstOrDefault(f => f.Port == w.Port)?.Rpm,
             WidgetSource.FanDuty => t.Fans.FirstOrDefault(f => f.Port == w.Port)?.Duty, _ => null
         };
-        string formatted = w.Source is WidgetSource.Clock or WidgetSource.Date ? t.Time.LocalDateTime.ToString(w.ValueFormat, CultureInfo.InvariantCulture)
-            : value.HasValue && double.IsFinite(value.Value) ? value.Value.ToString(w.ValueFormat, CultureInfo.InvariantCulture) : "—";
-        return w.TextTemplate.Replace("{value}", formatted, StringComparison.Ordinal);
+    public static double? GaugeFraction(LcdWidget w, Telemetry t)
+    {
+        var value = NumericValue(w, t);
+        return value.HasValue && double.IsFinite(value.Value) && w.GaugeMaximum > w.GaugeMinimum
+            ? Math.Clamp((value.Value - w.GaugeMinimum) / (w.GaugeMaximum - w.GaugeMinimum), 0, 1) : null;
     }
     public static List<LcdWidget> Defaults(int width, int height)
     {
@@ -105,6 +128,8 @@ public static class WidgetLayout
             W("CPU value", WidgetSource.CpuTemperature, "{value}°", 60, 150, 360, 105, 88),
             W("GPU", WidgetSource.GpuTemperature, "GPU {value} °C", 75, 275, 330, 45, 30, "97ACBF"),
             W("RAM", WidgetSource.MemoryUsedPercent, "MEMORY {value}%", 90, 327, 300, 32, 22, "97ACBF"),
-            W("Clock", WidgetSource.Clock, "{value}", 100, 371, 280, 40, 26, "26DAB3", "HH:mm:ss")];
+            W("Clock", WidgetSource.Clock, "{value}", 100, 371, 280, 40, 26, "26DAB3", "HH:mm:ss"),
+            new LcdWidget { Name = "CPU temperature ring", Kind = WidgetKind.RadialGauge, Source = WidgetSource.CpuTemperature,
+                X = 20, Y = 20, Width = 440, Height = 440, Foreground = "26DAB3", GaugeShowText = false }];
     }
 }

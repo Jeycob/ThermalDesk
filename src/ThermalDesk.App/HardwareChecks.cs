@@ -29,6 +29,92 @@ internal static class HardwareChecks
                 if (!available) exit = 2;
                 report["usbOpened"] = false;
             }
+            else if (mode == "--controller-profile-check")
+            {
+                if (Engine.Conflicts().Length != 0 || ProcessRunning()) throw new InvalidOperationException("Close other hardware-control applications first.");
+                var profile = SettingsStore.Load(Path.GetFullPath(output) + ".profile.json");
+                if (!profile.CoolingEnabled || !profile.CoolingWiringConfirmed || profile.Ports.Any(p => p.Role != PortRole.Fan || p.Mode == ControlMode.Preserve))
+                    throw new ArgumentException("This check requires an explicitly configured five-fan profile. Pumps and unknown wiring are excluded.");
+                using (var monitor = new Monitoring())
+                {
+                    var t = monitor.Read();
+                    if (t.CpuTemperature is not (>= 5 and < 80) || t.GpuTemperature is not (>= 5 and < 80)) throw new InvalidOperationException("Valid core temperatures under 80 C required before starting.");
+                }
+                var engine = new Engine(); int applies = 0; var samples = new List<object>();
+                report["fanSpeedWrites"] = true;
+                try
+                {
+                    engine.Start(profile, true);
+                    for (int second = 0; second < 90; second++)
+                    {
+                        Thread.Sleep(1000);
+                        if (engine.ControllerFault || engine.Cancelled) throw new IOException("Controller fault or conflict; test stopped without reconnecting.");
+                        var t = engine.Latest;
+                        if (second > 8 && (t.CpuTemperature is not (>= 5 and < 85) || t.GpuTemperature is not (>= 5 and < 85)))
+                            throw new IOException("Core temperatures became unavailable/critical; test stopped with safe duty.");
+                        if (second % 5 == 0) samples.Add(new { second, t.CpuTemperature, t.GpuTemperature, fans = engine.Fans.Values.OrderBy(x => x.Port).ToArray(), status = engine.Status.ToDictionary() });
+                        // Exercise in-place UI-equivalent changes, not session restarts.
+                        if (second == 30)
+                        { var full = profile.Copy(); foreach (var p in full.Ports) FanPresets.Apply(p, FanPreset.Full); engine.ApplyLiveSettings(full); applies++; }
+                        if (second == 40) { engine.ApplyLiveSettings(profile); applies++; }
+                        if (second == 65)
+                        { var lighting = profile.Copy(); lighting.Ports[0].RgbEffect = RgbEffect.Breathing; engine.ApplyLiveSettings(lighting); applies++; }
+                        if (second == 80) { engine.ApplyLiveSettings(profile); applies++; }
+                    }
+                    report["controllerConnectedCount"] = engine.Logs.Count(x => x.Contains("Controller: Connected"));
+                    if (engine.Fans.Count != 5 || (int)report["controllerConnectedCount"]! != 1) throw new IOException("Missing fan feedback or an unexpected controller reopen.");
+                }
+                finally
+                {
+                    report["samples"] = samples; report["log"] = engine.Logs; report["inPlaceApplies"] = applies;
+                    engine.Stop().GetAwaiter().GetResult();
+                    report["endPolicy"] = "Captured original duties requested back; not BIOS hand-back. No forced full-speed fallback.";
+                }
+                report["commands"] = "90-second explicit five-fan profile + AX LCD test: Custom -> Full -> Custom; port-1 lighting animation -> saved lighting. Four in-place updates, no other controller or BIOS/pump commands.";
+                report["physicalColorOrLcdConfirmed"] = false;
+            }
+            else if (mode == "--controller-stability-check")
+            {
+                if (Engine.Conflicts().Length != 0 || ProcessRunning()) throw new InvalidOperationException("Close hardware-control applications before this attended test.");
+                using var monitor = new Monitoring();
+                Telemetry Guard()
+                {
+                    var t = monitor.Read();
+                    if (t.CpuTemperature is not (>= 5 and < 85) || t.GpuTemperature is not (>= 5 and < 85))
+                        throw new InvalidOperationException("CPU/GPU core must be valid and below 85 C.");
+                    return t;
+                }
+                Guard(); using var controller = new FanController("");
+                var baseline = controller.Read(1); report["baseline"] = baseline;
+                if (baseline.Rpm <= 0 || baseline.Duty is < 30 or > 100) throw new IOException("Invalid baseline.");
+                int target = Math.Max(70, baseline.Duty); controller.SetDuty(1, target); report["fanSpeedWrites"] = true;
+                var port = new PortSettings { Port = 1, LedCount = 24, RgbColor = "23D6BA", RgbBrightness = 40 };
+                var samples = new List<object>(); int frames = 0;
+                Thread.Sleep(2000);
+                var clock = System.Diagnostics.Stopwatch.StartNew(); double nextRead = 0; var telemetry = Guard();
+                while (clock.Elapsed.TotalSeconds < 40)
+                {
+                    double seconds = clock.Elapsed.TotalSeconds;
+                    if (seconds >= nextRead)
+                    {
+                        telemetry = Guard(); var readings = Enumerable.Range(1, 5).Select(controller.Read).ToArray();
+                        samples.Add(new { seconds, phase = seconds < 5 ? "telemetry-only" : seconds < 20 ? "static-rgb" : "animated-rgb", readings, controller.SkippedReports });
+                        File.WriteAllText(Path.GetFullPath(output) + ".progress.json", JsonSerializer.Serialize(new { seconds, readings, controller.SkippedReports }, Settings.JsonOptions));
+                        nextRead = clock.Elapsed.TotalSeconds + 2;
+                        if (readings[0].Duty != target || readings[0].Rpm <= 0) throw new IOException("Port 1 feedback changed unexpectedly during the combined test.");
+                    }
+                    if (seconds >= 5)
+                    {
+                        port.RgbEffect = seconds < 20 ? RgbEffect.Static : RgbEffect.Breathing;
+                        controller.SetRgbFrame(1, Lighting.Frame(port, "23D6BA", seconds, telemetry)); frames++;
+                    }
+                    Thread.Sleep(200);
+                }
+                Guard(); report["restored"] = controller.RestoreAcceptanceDuty(1, baseline.Duty);
+                report["samples"] = samples; report["rgbFrames"] = frames; report["skippedReports"] = controller.SkippedReports;
+                report["commands"] = "40-second combined port-1 fan/RGB test with all-port readback. Never below baseline; original duty restored and confirmed. No controller reconnect, other-port speed or BIOS/pump command.";
+                report["physicalColorConfirmed"] = false;
+            }
             else if (mode == "--fan-curve-acceptance")
             {
                 if (Engine.Conflicts().Length != 0) throw new InvalidOperationException("Close TT and other controllers before the attended test.");
@@ -67,7 +153,7 @@ internal static class HardwareChecks
                 {
                     report["stages"] = stages;
                     if (safeToRestore) report["restored"] = controller.RestoreAcceptanceDuty(1, original.Duty);
-                    else report["restorePolicy"] = "Test failed: managed port requested to run at 100% on disposal; restore TT before unattended use.";
+                    else report["restorePolicy"] = "Test failed: captured baseline requested back on disposal; restore TT before unattended use.";
                 }
                 report["commands"] = "Attended port-1 curve test; never below original duty, then original duty restored and confirmed. No other port, RGB or pump command.";
             }
@@ -127,4 +213,6 @@ internal static class HardwareChecks
         Console.WriteLine(json);
         return exit;
     }
+    private static bool ProcessRunning() => System.Diagnostics.Process.GetProcessesByName("ThermalDesk").Any(p =>
+    { using (p) return p.Id != Environment.ProcessId; });
 }

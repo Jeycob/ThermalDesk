@@ -13,7 +13,7 @@ For actual hardware:
 1. Close TT RGB Plus and other fan/RGB controller applications yourself.
 2. In **Displays**, enable the desired LCD. Start with Dashboard, 1 FPS.
 3. Click **Start live control** and confirm. Check both the real screen and the log.
-4. Test RGB separately: select the correct ports and LED counts under **Cooling + RGB**, enable RGB, restart the live session.
+4. Test RGB separately: select the correct ports and LED counts under **Cooling + RGB**, enable RGB, then confirm live access. Later valid curve/color/widget edits apply automatically without reopening the controller.
 5. Only consider fan control after verifying physical wiring and independent thermal protection. Do not test experimental cooling unattended.
 
 No existing TT installation, startup task, driver, or profile is automatically changed. **Stop** releases devices. To return to TT RGB Plus, stop/exit ThermalDesk first, then start TT RGB Plus.
@@ -29,9 +29,9 @@ confirm live control again afterward. It does not install a driver or change BIO
 
 | USB ID | Implementation | Validation status |
 |---|---|---|
-| `264A:233D` | 3.9-inch 480×128 LCD, MI_00 command + MI_01 frame channels | Protocol/unit tested; physical-device test pending |
+| `264A:233D` | 3.9-inch 480×128 LCD, MI_00 command + MI_01 frame channels | Protocol/unit tested; currently absent from target-PC USB inventory |
 | `264A:2328` | TOUGHLIQUID AX 480×480 LCD | 60-second physical dashboard test passed on firmware 1.0.5.4; other firmware unverified |
-| `264A:232B` | Five-port USB fan controller + direct RGB | Port 1 curve test and all five RPM readbacks passed; RGB colors/unattended operation unverified |
+| `264A:232B` | Five-port USB fan controller + direct RGB | 40-second mixed fan/RGB test and 90-second five-fan profile test passed; physical colors/long-term operation still unverified |
 
 Unknown IDs and unexpected report lengths are rejected, not guessed. Multiple physical controllers require explicit selection. HKC LCD firmware is not supported. Physical testing is necessary; a successful build is not a safety certification.
 
@@ -49,8 +49,21 @@ Zero-valued sentinel temperatures are rejected, not shown as real readings.
 An attended port-1 curve test passed: 30% / 429 RPM → 78% / 1577 RPM → 98% / 1974 RPM.
 Original 30% duty was restored and confirmed; TT was restarted. Other ports were
 not speed-controlled. ThermalDesk has not replaced unattended cooling.
-The round dashboard labels have been enlarged following operator feedback; their
-new physical size has not yet been confirmed on the target LCD.
+The operator confirmed that the enlarged round CPU dashboard works well.
+
+Version 0.3.1 exposed a real mixed-control bug: RGB/SET acknowledgements accumulated
+in the telemetry queue, but the reader skipped only four reports before failing.
+Automatic reconnect then repeatedly requested safe 100% duty, producing fan pulses
+and RGB resets. Version 0.3.2 matches the entire telemetry header with a bounded
+1200 ms / 128-report budget. A real 40-second test skipped 160 unrelated reports
+without a failure; duty remained 70%, approximately 1440 RPM. A separate 90-second
+test exercised all five TT custom curves, Full and four in-place updates with one
+controller connection. These short tests are not unattended-use certification.
+
+The second chassis LCD is remembered in the TT profile but does not currently
+enumerate as a present USB device. No guessed device ID or firmware command is
+used to work around a missing connection. Its USB data/power connection needs
+checking before a physical test is possible.
 
 This is **not** a universal replacement for every TT product or feature: no PSU control, TOUGHRAM RGB, firmware update, Razer/cloud integration, video-file decoder or vendor mini-games. Motherboard fan headers and the AIO pump remain under their existing BIOS control unless physically connected to and explicitly managed through the supported USB controller.
 
@@ -58,9 +71,9 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 
 - CPU/GPU temperature and load, memory usage, and app CPU/RAM/thread/handle counters.
 - Two independent LCDs: telemetry dashboard, image/GIF, or primary-screen mirroring; rotation, brightness, overlays, 1–10 FPS.
-- Native per-LCD widget editor: drag/resize, numeric bounds, font picker, size, bold, custom text, colors, alignment and sensor bindings.
+- Native per-LCD widget editor: drag/resize, numeric bounds, font picker, size, bold, custom text, colors, alignment and sensor bindings. Editable radial gauges include range, thickness, track color and arc angles.
 - Image/GIF fitting preserves aspect ratio. GIF frames are sampled at the configured refresh rate; no video decoder runs in the background.
-- Per-port Preserve / Fixed / Curve cooling, draggable curve points, fan/pump roles, minimum speeds, CPU/GPU sensor selection and optional read-only RPM feedback.
+- Per-port Preserve / Fixed / Curve cooling, Silent / Custom / Full presets, named locations, draggable curve points, TT nine-point curve import, fan/pump roles, minimum speeds, CPU/GPU sensor selection and optional read-only RPM feedback.
 - Per-port Static, Breathing, Blink, ColorCycle, RainbowWave and Temperature RGB effects. Color, brightness, LED count and period are editable. Animations are capped at 5 FPS; thermal decisions run first.
 - JSON profiles, bounded in-memory log, diagnostics export, tray operation and opt-in preview or elevated saved-live sign-in startup.
 - Latest-snapshot telemetry and separate device loops: a stalled display does not block fan control. No thread per sensor, fan, or LED.
@@ -71,42 +84,43 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 
 Managed channels:
 
-- Start at 100% before evaluating temperatures.
-- Missing/invalid CPU temperature, stale data over 5 seconds, or selected missing curve sensor → request 100%.
+- Wait briefly for initial sensor data, then use the validated curve. Missing/invalid initial data aborts before taking control; it does not command full speed.
+- Missing/invalid CPU temperature, stale data over 5 seconds, or a missing selected curve sensor → release software control and request the captured original duty back. Restore the proven vendor controller; a static restored duty is not a dynamic firmware curve.
 - CPU or GPU at/above 85 °C → request 100% without ramp delay.
 - Fan minimum at least 30%; configured pump minimum at least 60%. These are conservative software limits, not manufacturer-certified safe speeds.
 - Cooling increases are immediate. Decreases are limited to 3 percentage points/second and use 2 °C downward hysteresis.
-- Repeated zero-RPM readings or a detected controller error → close/retry, requesting 100% on managed ports if USB still works.
-- Normal stop/exit requests 100% on managed ports. It does not restore the earlier speed or a firmware curve.
+- Repeated zero-RPM readings or a detected controller error → request the captured original duty if USB still works, close and latch the fault. No forced 100% fallback or automatic reconnect loop. Resolve the cause and restore vendor control before retrying.
+- Normal stop/exit requests each managed port's captured original duty. It does not restore a firmware curve. Only a genuine critical-temperature condition retains emergency cooling; Full and high-temperature curve requests remain explicit operations.
 
 **A killed/frozen process, lost USB connection, driver fault, power loss or pre-login interval cannot be made safe by a process-exit handler.** No hardware watchdog has been verified. Keep BIOS/firmware cooling and thermal protection independent of this experimental software. Do not assume an exit-time request succeeded after hardware failure. Do not lower pump speed based only on its name or temperature readings.
 
-Some CPU sensors require administrator rights and a supported LibreHardwareMonitor/PawnIO installation. ThermalDesk does not install drivers, turn off Defender, disable driver protections or fall back to an unsafe unverified driver. If CPU temperature is unavailable, fix sensor access before using curves; the app requests safe duty meanwhile.
+Some CPU sensors require administrator rights and a supported LibreHardwareMonitor/PawnIO installation. ThermalDesk does not install drivers, turn off Defender, disable driver protections or fall back to an unsafe unverified driver. If CPU temperature is unavailable, fix sensor access before taking over curves; keep the vendor controller active meanwhile.
 
 ## Profiles and privacy
 
 ### Configure fans and lighting
 
 1. Open **Cooling + RGB → Edit…** on the correct physical port.
-2. Leave **Preserve** to keep speed commands off. For a verified fan, select **Fixed** or **Curve**, its temperature source and minimum duty. Drag curve points or edit the numeric table. Apply and save the profile.
+2. Leave **Preserve** to keep speed commands off. For a verified fan, choose **Silent**, **Custom** or **Full**. The main window's quick buttons affect already-managed fans only, not pumps or unknown ports. Silent is a temperature curve, not fan-off; Custom restores your retained custom curve; Full requests 100%. **Import TT curve…** accepts nine percentages corresponding to 20,30,…,100 °C, including small dips.
 3. For lighting, enable that port's RGB, choose its physical LED count, effect, brightness and period. Blank per-port color inherits the main window color. A 1-second minimum period prevents rapid strobing; blink remains opt-in.
-4. Enable the appropriate main **Cooling** / **RGB** checkbox. Restart and confirm the live session to apply. Editing a curve never silently commands a fan.
+4. Enable the appropriate main **Cooling** / **RGB** checkbox and start a session once. After that, valid curves/colors/widgets save and apply automatically, about 450 ms after editing; a fan decision reaches the next control tick (normally within 2 seconds). No Stop/Apply sequence is needed. Invalid partial edits stay pending. Changing the controller, managed ports, wiring, polling or LCD brightness still requires Stop first; it never silently restarts all fans.
 5. **Monitor controller RPM** polls all five ports without speed writes; it still opens and queries the USB controller. Do not run it alongside TT.
 
 Duty **%** is the requested controller output, not watts, RPM or a confirmed
 electrical PWM/DC selector. The known protocol does not expose safe PWM/DC mode
 switching. No such switch is guessed. The BIOS-controlled pump remains unchanged.
-RGB patterns have automated packet tests, not yet a physical color/LED-count check.
+RGB has packet tests and a mixed-control timing test, not yet a physical color/LED-count confirmation.
 
 ### Customize the LCDs
 
 1. Open **Displays → Edit widgets…** under the correct device.
 2. Select a widget on the canvas or in the list. Drag to move; drag the bottom-right handle to resize. Arrow keys move 1 pixel; Shift moves 10.
 3. Change **Source**, **Text**, **ValueFormat**, geometry, font and colors in the properties panel. **Font…** opens the font picker. Transparent background leaves the canvas/image visible.
+   Set **Kind = RadialGauge** for a numeric progress ring. The **Radial gauge** category controls its range, thickness, track color, start/sweep angles and optional center text. Missing data leaves only the track, never a fabricated reading.
 4. Text such as `CPU {value} °C` inserts the selected sensor. Numeric formats: `0`, `0.0`. Clock: `HH:mm:ss`. Date: `yyyy-MM-dd`. No expressions or code are evaluated. Missing sensors show `—`.
 5. Sources: CPU/GPU core, GPU hotspot/memory temperature, CPU/GPU load, RAM usage, clock/date and port 1–5 fan RPM/duty. Fan data requires an active controller session; preview does not poll hardware.
 6. **Add / Duplicate / Delete** manage widgets; **Back / Front** change overlap order. **Canvas color…** changes the background. **Export PNG…** saves a full-resolution frame.
-7. **Apply layout → Save profile**. Click **Preview** to restart simulated rendering with the new design. Live changes require stopping and explicitly confirming a new live session; editing never silently restarts fans or writes USB.
+7. Close the widget editor with **Apply layout**. The main window automatically saves and updates the running display without restarting fans. In Preview, only simulated rendering updates. Editing inside an open modal designer remains a preview until you accept the layout.
 
 Layouts are independent for the 480×128 panel and 480×480 AX LCD. Coordinates are
 before rotation; orientation changes reframe the layout. The circle guide shows

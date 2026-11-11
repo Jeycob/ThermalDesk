@@ -12,16 +12,16 @@ var safety = new FanSafety();
 Check(safety.Evaluate(port, Tele(), now, 2).Duty == 50, "curve interpolation");
 Check(safety.Evaluate(port, Tele(86), now, 2).Duty == 100, "CPU critical immediate");
 Check(safety.Evaluate(port, Tele(40, 90), now, 2).Duty == 100, "GPU critical immediate");
-Check(safety.Evaluate(port, Tele(null), now, 2).Duty == 100, "missing CPU");
-Check(safety.Evaluate(port, Tele(double.NaN), now, 2).Duty == 100, "NaN CPU");
-Check(safety.Evaluate(port, Tele(0), now, 2).Duty == 100, "zero CPU sensor sentinel");
-Check(safety.Evaluate(port, Tele(-5), now, 2).Duty == 100, "implausible CPU sensor");
-Check(safety.Evaluate(port, Tele(40, double.PositiveInfinity), now, 2).Duty == 100, "invalid max-source GPU");
-Check(safety.Evaluate(port, Tele() with { Time = now.AddSeconds(-6) }, now, 2).Duty == 100, "stale data");
-Check(safety.Evaluate(port, Tele() with { Time = now.AddSeconds(10) }, now, 2).Duty == 100, "future data rejected");
+Check(safety.Evaluate(port, Tele(null), now, 2).Duty is null, "missing CPU releases control, not forced 100%");
+Check(safety.Evaluate(port, Tele(double.NaN), now, 2).Duty is null, "NaN CPU releases control");
+Check(safety.Evaluate(port, Tele(0), now, 2).Duty is null, "zero CPU sensor sentinel");
+Check(safety.Evaluate(port, Tele(-5), now, 2).Duty is null, "implausible CPU sensor");
+Check(safety.Evaluate(port, Tele(40, double.PositiveInfinity), now, 2).Duty is null, "invalid max-source GPU");
+Check(safety.Evaluate(port, Tele() with { Time = now.AddSeconds(-6) }, now, 2).Duty is null, "stale data releases without a full-speed command");
+Check(safety.Evaluate(port, Tele() with { Time = now.AddSeconds(10) }, now, 2).Duty is null, "future data rejected");
 port.Mode = ControlMode.Fixed; port.FixedDuty = 30; port.Role = PortRole.Pump; safety.Reset();
 Check(safety.Evaluate(port, Tele(), now, 2).Duty == 60, "pump hard minimum");
-Check(safety.Evaluate(port, Tele(null), now, 2).Duty == 100, "fixed-mode CPU missing");
+Check(safety.Evaluate(port, Tele(null), now, 2).Duty is null, "fixed-mode CPU missing releases control");
 port.Role = PortRole.Fan; port.FixedDuty = 70; safety.Reset();
 Check(safety.Evaluate(port, Tele(), now, 2).Duty == 70, "fixed duty");
 port.FixedDuty = 40;
@@ -41,7 +41,7 @@ settings.CoolingEnabled = true; Throws(settings.Validate, "arming requires wirin
 settings.CoolingWiringConfirmed = true; settings.Ports[0].Mode = ControlMode.Curve; Throws(settings.Validate, "unknown port role rejected");
 settings.Ports[0].Role = PortRole.Fan; settings.Validate(); Check(true, "valid armed profile");
 settings.Ports[0].Curve = [new(50, 50), new(40, 60)]; Throws(settings.Validate, "unsorted curve rejected");
-settings = new(); settings.Ports[0].Curve = [new(40, 60), new(50, 50)]; Throws(settings.Validate, "decreasing duty rejected");
+settings = new(); settings.Ports[0].Curve = [new(20, 30), new(30, 30), new(40, 33), new(50, 30), new(60, 30), new(70, 42), new(80, 59), new(90, 100), new(100, 100)]; settings.Validate(); Check(true, "TT custom dip preserved without sorting duty values");
 settings = new(); settings.Ports[1].Port = 1; Throws(settings.Validate, "duplicate port rejected");
 settings = new(); settings.PollSeconds = 11; Throws(settings.Validate, "bounded polling");
 settings = new(); settings.Panel.Rotation = 42; Throws(settings.Validate, "invalid rotation rejected");
@@ -116,7 +116,7 @@ settings = new(); settings.Aio = new() { UseCustomLayout = true, Widgets = Widge
 try
 {
     SettingsStore.Save(path, settings); var roundtrip = SettingsStore.Load(path);
-    Check(roundtrip.Aio.Widgets.Count == 6 && roundtrip.Aio.UseCustomLayout && roundtrip.Panel.Widgets.Count == 0, "independent LCD widget profile roundtrip");
+    Check(roundtrip.Aio.Widgets.Count == 7 && roundtrip.Aio.UseCustomLayout && roundtrip.Panel.Widgets.Count == 0, "independent LCD widget profile roundtrip");
     roundtrip.Aio.Widgets[0].Foreground = "112233";
     Check(settings.Aio.Widgets[0].Foreground != "112233", "roundtrip isolates widget edits");
 }
@@ -147,4 +147,40 @@ settings = new(); settings.Ports[0].RgbColor = "GGGGGG"; Throws(settings.Validat
 settings = new(); settings.StartLiveAtSignIn = true; Throws(settings.Validate, "auto live cannot arm an empty profile");
 settings.Aio.Enabled = true; settings.Validate(); Check(true, "explicit saved LCD startup profile validates without enabling fans");
 var portCopy = settings.Ports[0].Copy(); portCopy.RgbEffect = RgbEffect.RainbowWave; portCopy.Curve[0] = new(20, 30); Check(settings.Ports[0].Curve[0].Temperature == 30 && settings.Ports[0].RgbEffect == RgbEffect.Static, "port editor works on independent data");
+var backlog = new Queue<byte[]>();
+for (int i = 0; i < 40; i++) backlog.Enqueue([0, 0x32, i % 2 == 0 ? (byte)0x52 : (byte)0x51, 1, 0, 90]);
+backlog.Enqueue([0, 0x33, 0x51, 2, 0, 40, 10, 0]); // Wrong port is not a match.
+backlog.Enqueue([0, 0x33, 0x51, 1, 0, 101, 10, 0]); // Invalid duty is not telemetry.
+backlog.Enqueue([0, 0x33, 0x51, 1, 0, 60, 0x34, 0x12]);
+int skipped = 0;
+var freshFan = FanResponseReader.Read(_ => backlog.Dequeue(), 1, n => skipped = n);
+Check(freshFan.Rpm == 0x1234 && skipped == 42 && backlog.Count == 0, "RGB/SET acknowledgement backlog is skipped until the complete telemetry header matches");
+int noiseReads = 0; bool noiseBounded = false;
+try { FanResponseReader.Read(_ => { noiseReads++; return [0, 0x32, 0x52, 1]; }, 1); }
+catch (IOException) { noiseBounded = true; }
+Check(noiseBounded && noiseReads == 128, "noisy endpoint has a hard packet budget");
+bool timeoutReported = false;
+try { FanResponseReader.Read(_ => throw new TimeoutException(), 1); }
+catch (IOException e) { timeoutReported = e.Message.Contains("port 1"); }
+Check(timeoutReported, "timeout becomes an actionable fault, never fake zero telemetry");
+var presetPort = new PortSettings { Port = 1, Role = PortRole.Fan, MinimumDuty = 40 };
+FanPresets.Apply(presetPort, FanPreset.Silent); Check(FanPresets.Identify(presetPort) == FanPreset.Silent && presetPort.MinimumDuty == 40, "Silent retains user safety minimum");
+FanPresets.Apply(presetPort, FanPreset.Full); Check(presetPort.Mode == ControlMode.Fixed && presetPort.FixedDuty == 100, "Full requests 100%");
+FanPresets.Apply(presetPort, FanPreset.Custom); Check(presetPort.Mode == ControlMode.Curve, "Custom exposes curve");
+Check(presetPort.Curve.SequenceEqual(new PortSettings().Curve), "Custom restores the original curve after Silent and Full");
+Throws(() => FanPresets.Apply(new PortSettings(), FanPreset.Silent), "preset cannot infer unknown wiring");
+presetPort.Role = PortRole.Pump; FanPresets.Apply(presetPort, FanPreset.Silent); Check(presetPort.MinimumDuty >= 60, "Silent never bypasses pump floor");
+var gaugeDisplay = new DisplaySettings { Widgets = WidgetLayout.Defaults(480, 480) };
+var importedCurve = TtCurveImporter.Parse("30,30,33,30,30,42,59,100,100");
+Check(importedCurve.Count == 9 && importedCurve[2] == new CurvePoint(40,33) && importedCurve[3] == new CurvePoint(50,30) && importedCurve[^1] == new CurvePoint(100,100), "TT nine points preserve temperature grid and dip exactly");
+Throws(() => TtCurveImporter.Parse("1,2"), "incomplete TT curve rejected");
+Throws(() => TtCurveImporter.Parse("30,30,30,30,30,30,30,30,NaN"), "nonfinite TT duty rejected");
+Throws(() => TtCurveImporter.Parse("0,30,30,30,30,30,30,30,100"), "import cannot bypass minimum duty");
+var gauge = gaugeDisplay.Widgets.Single(w => w.Kind == WidgetKind.RadialGauge);
+Check(WidgetLayout.GaugeFraction(gauge, Tele(60)) == .6, "gauge maps temperature to progress");
+Check(WidgetLayout.GaugeFraction(gauge, Tele(null)) == null, "missing gauge value is not a real zero reading");
+Check(WidgetLayout.GaugeFraction(gauge, Tele(150)) == 1 && WidgetLayout.GaugeFraction(gauge, Tele(-5)) == 0, "gauge progress clamped");
+gauge.GaugeMaximum = 0; Throws(() => WidgetLayout.Validate(gaugeDisplay, 480, 480), "zero gauge range rejected"); gauge.GaugeMaximum = 100;
+gauge.Source = WidgetSource.Clock; Throws(() => WidgetLayout.Validate(gaugeDisplay, 480, 480), "non-numeric gauge source rejected"); gauge.Source = WidgetSource.CpuTemperature;
+gauge.GaugeThickness = float.NaN; Throws(() => WidgetLayout.Validate(gaugeDisplay, 480, 480), "nonfinite gauge geometry rejected");
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");

@@ -208,6 +208,7 @@ internal sealed class DesignerCanvas : Control
 internal sealed class WidgetProperties(LcdWidget widget)
 {
     [Category("1 · Content")] public string Name { get => widget.Name; set => widget.Name = value; }
+    [Category("1 · Content")] public WidgetKind Kind { get => widget.Kind; set => widget.Kind = value; }
     [Category("1 · Content"), Description("Choose a sensor. Source changes set a matching default unit/label; customize Text afterward.")]
     public WidgetSource Source
     {
@@ -237,4 +238,11 @@ internal sealed class WidgetProperties(LcdWidget widget)
     [Category("3 · Typography")] public WidgetAlignment Alignment { get => widget.Alignment; set => widget.Alignment = value; }
     [Category("4 · Colors")] public Color Foreground { get => FrameRenderer.ParseColor(widget.Foreground); set => widget.Foreground = $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
     [Category("4 · Colors"), Description("Transparent leaves the canvas/media visible.")] public Color Background { get => widget.Background.Length == 0 ? Color.Transparent : FrameRenderer.ParseColor(widget.Background); set => widget.Background = value.A == 0 ? "" : $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
+    [Category("5 · Radial gauge")] public double Minimum { get => widget.GaugeMinimum; set => widget.GaugeMinimum = value; }
+    [Category("5 · Radial gauge")] public double Maximum { get => widget.GaugeMaximum; set => widget.GaugeMaximum = value; }
+    [Category("5 · Radial gauge")] public float Thickness { get => widget.GaugeThickness; set => widget.GaugeThickness = value; }
+    [Category("5 · Radial gauge")] public float StartAngle { get => widget.GaugeStartAngle; set => widget.GaugeStartAngle = value; }
+    [Category("5 · Radial gauge")] public float SweepAngle { get => widget.GaugeSweepAngle; set => widget.GaugeSweepAngle = value; }
+    [Category("5 · Radial gauge")] public bool ShowText { get => widget.GaugeShowText; set => widget.GaugeShowText = value; }
+    [Category("5 · Radial gauge")] public Color TrackColor { get => FrameRenderer.ParseColor(widget.GaugeTrackColor); set => widget.GaugeTrackColor = $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
 }

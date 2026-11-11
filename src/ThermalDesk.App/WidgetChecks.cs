@@ -31,12 +31,13 @@ internal static class WidgetChecks
             profile.Panel.UseCustomLayout = profile.Aio.UseCustomLayout = true;
             profile.Panel.Widgets = WidgetLayout.Defaults(480, 128); profile.Aio.Widgets = WidgetLayout.Defaults(480, 480);
             string path = Path.Combine(directory, "widget-profile.json"); SettingsStore.Save(path, profile); var restored = SettingsStore.Load(path);
-            Check(restored.Aio.Widgets.Count == 6 && restored.Panel.Widgets.Count == 5, "Profile must round-trip both independent layouts.");
+            Check(restored.Aio.Widgets.Count == 7 && restored.Panel.Widgets.Count == 5, "Profile must round-trip both independent layouts.");
             using (var form = new WidgetDesignerForm("TOUGHLIQUID AX · 480 × 480", restored.Aio, 480, 480, () => t))
-            { form.RenderForTest(Path.Combine(directory, "designer-round.png")); Check(form.Result.Widgets.Count == 6, "Designer must keep widgets."); count += form.ExerciseForTest(); Check(restored.Aio.Widgets.Count == 6, "Editing a dialog must not mutate its input profile."); }
+            { form.RenderForTest(Path.Combine(directory, "designer-round.png")); Check(form.Result.Widgets.Count == 7, "Designer must keep widgets."); count += form.ExerciseForTest(); Check(restored.Aio.Widgets.Count == 7, "Editing a dialog must not mutate its input profile."); }
             using (var form = new WidgetDesignerForm("3.9-inch LCD · 480 × 128", restored.Panel, 480, 128, () => t))
             { form.RenderForTest(Path.Combine(directory, "designer-wide.png")); Check(form.Result.Widgets.Count == 5, "Wide designer must keep widgets."); count += form.ExerciseForTest(); }
             using (var form = new MainForm(restored, path)) form.RenderPreview(Path.Combine(directory, "main-widgets.png"));
+            using (var form = new MainForm(new Settings(), Path.Combine(directory, "automatic-settings.json"))) count += form.ExerciseAutomaticSettingsForTest();
             using (var form = new PortEditorForm(new PortSettings { Port = 1 })) count += form.ExerciseForTest(Path.Combine(directory, "port-editor.png"));
             var fake = new TestController();
             var rgbSettings = new Settings { RgbEnabled = true, MonitorFanController = true };
@@ -47,6 +48,42 @@ internal static class WidgetChecks
             Check(fake.DutyWrites == 0, "RGB-only session must never send fan duty writes.");
             Check(fake.LightingFrames is >= 3 and <= 14, "RGB cadence must remain bounded near five frames/second.");
             Check(simulation.Fans.Count == 5, "Read-only controller monitoring must expose all five ports.");
+            int opens = 0;
+            var control = new TestController();
+            var cooling = new Settings { CoolingEnabled = true, CoolingWiringConfirmed = true };
+            cooling.Ports[0].Role = PortRole.Fan; cooling.Ports[0].Mode = ControlMode.Curve;
+            var live = new Engine(_ => { Interlocked.Increment(ref opens); return control; }, () => t with { Time = DateTimeOffset.UtcNow }, () => []);
+            live.Start(cooling, true); Thread.Sleep(400);
+            var changed = cooling.Copy(); FanPresets.Apply(changed.Ports[0], FanPreset.Full); live.ApplyLiveSettings(changed);
+            Thread.Sleep(2200);
+            Check(opens == 1 && control.LastDuty == 100, "Live Full preset applies without reopening controller");
+            Check(control.FirstDuty is >= 30 and < 100, "Healthy initial telemetry uses the curve, not an unconditional 100% burst");
+            bool topologyBlocked = false; changed.Ports[1].Role = PortRole.Fan; changed.Ports[1].Mode = ControlMode.Curve;
+            try { live.ApplyLiveSettings(changed); } catch (InvalidOperationException) { topologyBlocked = true; }
+            Check(topologyBlocked && opens == 1, "Live updates cannot silently add a managed port");
+            Task.Run(async () => await live.Stop()).GetAwaiter().GetResult();
+            int faultOpens = 0;
+            var faulty = new Engine(_ => { Interlocked.Increment(ref faultOpens); return new FaultyController(); }, () => t with { Time = DateTimeOffset.UtcNow }, () => []);
+            faulty.Start(cooling, true); Thread.Sleep(5600);
+            Check(faulty.ControllerFault && faultOpens == 1 && faulty.Fans.Count == 0, "Telemetry failure latches: no repeated five-second controller resets");
+            bool faultApplyBlocked = false; try { faulty.ApplyLiveSettings(cooling); } catch (InvalidOperationException) { faultApplyBlocked = true; }
+            Check(faultApplyBlocked, "Fault requires explicit stop before retry");
+            Task.Run(async () => await faulty.Stop()).GetAwaiter().GetResult();
+            var transport = new TestFanLink();
+            using (var controller = new FanController(transport, 65))
+            { controller.SetDuty(1, 60); controller.SetDuty(1, 70); controller.PrepareToClose(false); }
+            Check(transport.Duties.SequenceEqual(new[] { 60, 70, 40 }), "Stop restores captured duty; never injects fallback 100%");
+            var emergency = new TestFanLink();
+            using (var controller = new FanController(emergency, 65))
+            { controller.SetDuty(1, 60); controller.PrepareToClose(true); }
+            Check(emergency.Duties.SequenceEqual(new[] { 60, 100 }), "Real critical-temperature close is distinct from ordinary stop");
+            var rgbOnly = new TestFanLink();
+            using (var controller = new FanController(rgbOnly, 65)) controller.SetRgbFrame(1, [new(0, 255, 0)]);
+            Check(rgbOnly.Duties.Count == 0, "RGB-only close never changes fan speed");
+            var unavailable = new TestFanLink { FailRead = true };
+            bool refused = false;
+            try { using var controller = new FanController(unavailable, 65); controller.SetDuty(1, 60); } catch (IOException) { refused = true; }
+            Check(refused && unavailable.Duties.Count == 0, "Unavailable baseline prevents takeover and sends no fallback 100%");
             var conflict = new Engine(_ => throw new InvalidOperationException("Must not open a device"), () => t, () => ["TTRGBPlus"]);
             bool blocked = false; try { conflict.Start(rgbSettings, true); } catch (InvalidOperationException) { blocked = true; }
             Check(blocked && !conflict.Running, "Conflicting vendor process must block before device access.");
@@ -78,10 +115,37 @@ internal static class WidgetChecks
     }
     private sealed class TestController : IFanController
     {
-        public int DutyWrites, LightingFrames;
-        public void SetDuty(int port, int duty) => Interlocked.Increment(ref DutyWrites);
+        public int DutyWrites, LightingFrames, LastDuty, FirstDuty = -1;
+        public void SetDuty(int port, int duty) { Interlocked.Increment(ref DutyWrites); Interlocked.CompareExchange(ref FirstDuty, duty, -1); LastDuty = duty; }
         public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) => Interlocked.Increment(ref LightingFrames);
         public FanReading Read(int port) => new(port, 1200 + port * 100, 40);
+        public void PrepareToClose(bool criticalTemperature) { }
+        public void Dispose() { }
+    }
+    private sealed class FaultyController : IFanController
+    {
+        public void SetDuty(int port, int duty) { }
+        public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) { }
+        public FanReading Read(int port) => throw new IOException("Injected telemetry failure");
+        public void PrepareToClose(bool criticalTemperature) { }
+        public void Dispose() { }
+    }
+    private sealed class TestFanLink : IFanLink
+    {
+        private readonly Queue<byte[]> replies = new();
+        private int duty = 40;
+        public List<int> Duties { get; } = [];
+        public bool FailRead;
+        public void Write(byte[] packet)
+        {
+            if (packet[1] == 0x33 && packet[2] == 0x51) replies.Enqueue([0, 0x33, 0x51, packet[3], 0, (byte)duty, 0xe8, 3]);
+            else
+            {
+                if (packet[1] == 0x32 && packet[2] == 0x51) { duty = packet[5]; Duties.Add(duty); }
+                replies.Enqueue([0, packet[1], packet[2], packet[3], 0, 0, 0, 0]);
+            }
+        }
+        public byte[] Read(int length, int timeoutMilliseconds) => FailRead ? throw new IOException("USB unavailable") : replies.Dequeue();
         public void Dispose() { }
     }
 }

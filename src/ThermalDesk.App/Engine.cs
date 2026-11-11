@@ -17,6 +17,9 @@ internal sealed class Engine
     private Telemetry latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
     private readonly ConcurrentQueue<string> log = new();
     private volatile bool conflictingController;
+    private Settings current = new();
+    private volatile bool controllerFault;
+    public bool ControllerFault => controllerFault;
     public Telemetry Latest => Volatile.Read(ref latest);
     public ConcurrentDictionary<string, string> Status { get; } = new();
     public ConcurrentDictionary<int, FanReading> Fans { get; } = new();
@@ -46,7 +49,7 @@ internal sealed class Engine
         if (live && settings.CoolingEnabled && testTelemetry is null && !StartupManager.Elevated)
             throw new InvalidOperationException("CPU sensor access on this PC requires administrator rights. Restart as administrator before enabling cooling.");
         if (live && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
-        var s = settings.Copy(); stop = new(); var token = stop.Token; Live = live; conflictingController = false;
+        var s = settings.Copy(); Volatile.Write(ref current, s); stop = new(); var token = stop.Token; Live = live; conflictingController = false; controllerFault = false;
         Status.Clear(); Fans.Clear();
         latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
         Status["Session"] = live ? "LIVE · configured devices only" : "PREVIEW · no hardware access";
@@ -62,6 +65,24 @@ internal sealed class Engine
         }
         tasks = workers.ToArray();
     }
+    public void ApplyLiveSettings(Settings settings)
+    {
+        if (!Running || !Live || Cancelled || ControllerFault) throw new InvalidOperationException("No healthy live session. Stop and resolve the fault before reconnecting.");
+        settings.ValidateLiveSelection();
+        var before = Volatile.Read(ref current); var next = settings.Copy();
+        bool SamePorts() => before.Ports.All(p =>
+        {
+            var other = next.Ports.Single(x => x.Port == p.Port);
+            return p.Role == other.Role && (p.Mode == ControlMode.Preserve) == (other.Mode == ControlMode.Preserve);
+        });
+        if (before.ControllerSerial != next.ControllerSerial || before.CoolingEnabled != next.CoolingEnabled || before.RgbEnabled != next.RgbEnabled ||
+            before.MonitorFanController != next.MonitorFanController || before.PollSeconds != next.PollSeconds || !SamePorts() ||
+            before.Aio.Enabled != next.Aio.Enabled || before.Panel.Enabled != next.Panel.Enabled ||
+            before.Aio.Brightness != next.Aio.Brightness || before.Panel.Brightness != next.Panel.Brightness)
+            throw new InvalidOperationException("Changing devices, managed ports/wiring, polling or LCD brightness requires Stop first. Curve, RGB and widget edits can be applied without restarting fans.");
+        Volatile.Write(ref current, next);
+        Note("Live settings applied in place. Controller was not reinitialized; fan safety history retained.");
+    }
     public async Task Stop()
     {
         if (stop is null) return;
@@ -73,7 +94,7 @@ internal sealed class Engine
         catch (OperationCanceledException) { }
         catch (Exception e) { Note("Worker exited with error during stop: " + e.Message); }
         stop.Dispose(); stop = null; tasks = []; Live = false;
-        Status["Session"] = "Stopped"; Note("Stopped. Managed USB fan ports were requested to run at 100%; this is not BIOS hand-back.");
+        Status["Session"] = "Stopped"; Note("Stopped. Captured fan duties requested back, except a real critical-temperature override. Restoration is not BIOS hand-back or a guaranteed hardware watchdog.");
     }
     private async Task SensorLoop(int seconds, bool live, CancellationToken token)
     {
@@ -135,10 +156,11 @@ internal sealed class Engine
                     while (!token.IsCancellationRequested)
                     {
                         Guard(token);
-                        using var image = renderer.Render(Latest, settings, 480, panel ? 128 : 480);
+                        var active = Volatile.Read(ref current); var display = panel ? active.Panel : active.Aio;
+                        using var image = renderer.Render(Latest, display, 480, panel ? 128 : 480);
                         lcd.Send(FrameRenderer.Jpeg(image)); lcd.Heartbeat();
                         // Heartbeats stay at <= 2 s even when sensor polling is slower.
-                        await Task.Delay(TimeSpan.FromSeconds(1d / settings.FramesPerSecond), token);
+                        await Task.Delay(TimeSpan.FromSeconds(1d / display.FramesPerSecond), token);
                     }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
@@ -160,8 +182,21 @@ internal sealed class Engine
                 IFanController? controller = null;
                 try
                 {
+                    // Let the shared sampler publish its first reading before taking control.
+                    // A healthy start uses the real curve. Missing initial sensor data
+                    // aborts before opening the controller; it is not a full-speed command.
+                    var startupWait = Stopwatch.StartNew();
+                    while (monitored.Length > 0 && Latest.Time == DateTimeOffset.MinValue && startupWait.Elapsed.TotalSeconds < 4)
+                    { Guard(token); await Task.Delay(50, token); }
+                    var initialDecisions = monitored.ToDictionary(p => p.Port, p => policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, s.PollSeconds));
+                    if (initialDecisions.Values.Any(x => x.Duty is null)) throw new IOException("Initial temperature unavailable. Controller left untouched; keep vendor cooling active.");
                     Guard(token); controller = openController(s.ControllerSerial);
-                    foreach (var p in monitored) { policies[p.Port].Reset(); controller.SetDuty(p.Port, 100); }
+                    var lastDuty = new Dictionary<int, int>();
+                    foreach (var p in monitored)
+                    {
+                        var initial = initialDecisions[p.Port];
+                        controller.SetDuty(p.Port, initial.Duty!.Value); lastDuty[p.Port] = initial.Duty.Value;
+                    }
                     SetStatus("Controller", "Connected · 264A:232B");
                     var failures = monitored.ToDictionary(p => p.Port, _ => 0);
                     var clock = Stopwatch.StartNew(); double nextControl = 0, nextLight = 0;
@@ -169,13 +204,17 @@ internal sealed class Engine
                     while (!token.IsCancellationRequested)
                     {
                         Guard(token);
+                        s = Volatile.Read(ref current);
+                        monitored = s.Ports.Where(p => s.CoolingEnabled && p.Mode != ControlMode.Preserve).ToArray();
                         // Apply thermal decisions before any slower RPM queries or lighting transfers.
                         if (clock.Elapsed.TotalSeconds >= nextControl)
                         {
                             foreach (var p in monitored)
                             {
                                 var decision = policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, s.PollSeconds);
-                                controller.SetDuty(p.Port, decision.Duty!.Value);
+                                if (decision.Duty is null) throw new IOException(decision.Reason);
+                                if (lastDuty[p.Port] != decision.Duty!.Value)
+                                { controller.SetDuty(p.Port, decision.Duty.Value); lastDuty[p.Port] = decision.Duty.Value; }
                                 SetStatus($"Port {p.Port}", $"{decision.Duty}% · {decision.Reason}");
                             }
                             foreach (var p in s.Ports.Where(p => s.MonitorFanController || monitored.Any(m => m.Port == p.Port) || s.RgbEnabled && p.Rgb))
@@ -205,9 +244,23 @@ internal sealed class Engine
                     }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
-                catch (Exception e) { SetStatus("Controller", "ERROR · " + e.Message); }
-                finally { controller?.Dispose(); }
-                await Task.Delay(TimeSpan.FromSeconds(5), token);
+                catch (Exception e)
+                {
+                    controllerFault = true;
+                    SetStatus("Controller", "FAULT LATCHED · " + e.Message + " · captured duties requested back; no forced full-speed fallback or automatic reconnect. Restore vendor control.");
+                    foreach (var p in monitored) SetStatus($"Port {p.Port}", "FAULT · release requested · verify vendor control");
+                    Fans.Clear();
+                    break;
+                }
+                finally
+                {
+                    if (controller is not null)
+                    {
+                        var t = Latest;
+                        controller.PrepareToClose(t.CpuTemperature >= 85 || t.GpuTemperature >= 85);
+                        controller.Dispose();
+                    }
+                }
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -218,7 +271,7 @@ internal sealed class Engine
         {
             Status[key] = value;
             // Log state transitions/errors, not continuously changing temperatures/duty.
-            if (value.StartsWith("ERROR") || key is "Controller" || key.Contains("panel") || key.Contains("AX")) Note(key + ": " + value);
+            if (value.StartsWith("ERROR") || value.StartsWith("FAULT") || key is "Controller" || key.Contains("panel") || key.Contains("AX")) Note(key + ": " + value);
         }
     }
     private void Note(string message)

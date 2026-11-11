@@ -3,7 +3,12 @@ using ThermalDesk.Core;
 
 namespace ThermalDesk.App;
 
-internal sealed class HidLink : IDisposable
+internal interface IFanLink : IDisposable
+{
+    void Write(byte[] packet);
+    byte[] Read(int length, int timeoutMilliseconds);
+}
+internal sealed class HidLink : IFanLink
 {
     private readonly HidStream stream;
     public HidLink(HidDevice device, int outputLength)
@@ -22,6 +27,12 @@ internal sealed class HidLink : IDisposable
     public byte[] Read(int length)
     {
         var b = new byte[length]; int n = stream.Read(b); return b[..n];
+    }
+    public byte[] Read(int length, int timeoutMilliseconds)
+    {
+        int previous = stream.ReadTimeout;
+        try { stream.ReadTimeout = timeoutMilliseconds; return Read(length); }
+        finally { stream.ReadTimeout = previous; }
     }
     public void Feature(byte[] b) => stream.SetFeature(b);
     public byte[] GetFeature(byte id, byte prefix = 0)
@@ -56,7 +67,8 @@ internal sealed class PanelLcd : ILcd
     public PanelLcd(int brightness)
     {
         var devices = DeviceList.Local.GetHidDevices(Protocols.Vendor, Protocols.PanelPid).ToArray();
-        if (devices.Length != 2) throw new IOException("Panel requires exactly two HID interfaces (one physical panel).");
+        if (devices.Length == 0) throw new IOException("264A:233D chassis LCD is not present on USB. Check its USB data cable/power; a saved TT profile is not a connected device.");
+        if (devices.Length != 2) throw new IOException($"Panel requires two HID interfaces; found {devices.Length}. No commands sent.");
         var first = devices.Single(d => d.DevicePath.Contains("&mi_00", StringComparison.OrdinalIgnoreCase));
         var second = devices.Single(d => d.DevicePath.Contains("&mi_01", StringComparison.OrdinalIgnoreCase));
         command = new(first, 441);
@@ -117,51 +129,71 @@ internal interface IFanController : IDisposable
     void SetDuty(int port, int duty);
     void SetRgbFrame(int port, IReadOnlyList<LedColor> colors);
     FanReading Read(int port);
+    void PrepareToClose(bool criticalTemperature);
 }
 
 internal sealed class FanController : IFanController
 {
-    private readonly HidLink link;
+    private readonly IFanLink link;
     private readonly int inputLength;
-    private readonly HashSet<int> managed = [];
+    private readonly Dictionary<int, int> original = [];
+    private bool retainCriticalDuty;
+    public long SkippedReports { get; private set; }
+    internal FanController(IFanLink transport, int reportLength)
+    {
+        if (reportLength is < 8 or > 4096) throw new ArgumentException("Invalid test transport descriptor.");
+        link = transport; inputLength = reportLength;
+        link.Write(Protocols.FanCommand(0xfe, 0x33, 0));
+    }
     public FanController(string serial)
     {
         var device = HidLink.Single(Protocols.FanPid, serial);
         inputLength = device.GetMaxInputReportLength();
         if (inputLength is < 8 or > 4096) throw new NotSupportedException("Unexpected controller input descriptor.");
-        link = new(device, 193);
+        link = new HidLink(device, 193);
         try { link.Write(Protocols.FanCommand(0xfe, 0x33, 0)); }
         catch { link.Dispose(); throw; }
     }
-    public void SetDuty(int port, int duty) { managed.Add(port); link.Write(Protocols.SetDuty(port, duty)); }
+    public void SetDuty(int port, int duty)
+    {
+        if (!original.ContainsKey(port))
+        {
+            var baseline = Read(port);
+            if (baseline.Rpm <= 0 || baseline.Duty is < 30 or > 100) throw new IOException($"Port {port}: cannot confirm the original running duty. No speed command sent.");
+            original[port] = baseline.Duty;
+        }
+        link.Write(Protocols.SetDuty(port, duty));
+    }
+    public void PrepareToClose(bool criticalTemperature)
+    {
+        retainCriticalDuty = criticalTemperature;
+        if (criticalTemperature)
+            foreach (int port in original.Keys) { try { link.Write(Protocols.SetDuty(port, 100)); } catch { } }
+    }
     public void SetRgb(PortSettings port, string color) => link.Write(Protocols.Rgb(port.Port, port.LedCount, color));
     public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) => link.Write(Protocols.RgbFrame(port, colors));
     public FanReading Read(int port)
     {
         link.Write(Protocols.FanCommand(0x33, 0x51, port));
-        // Ignore at most four unrelated/initialization replies; never spin forever.
-        for (int i = 0; i < 4; i++)
-        {
-            var p = link.Read(inputLength);
-            try { return Protocols.ParseFan(p, port); } catch (ArgumentException) { }
-        }
-        throw new IOException($"No matching telemetry for port {port}.");
+        return FanResponseReader.Read(timeout => link.Read(inputLength, timeout), port, count => SkippedReports += count);
     }
-    // Used only by the explicitly requested, attended acceptance test. Ordinary
-    // live-session shutdown retains the conservative 100% policy in Dispose.
+    // Explicit diagnostic restoration also confirms readback before closing.
     public FanReading RestoreAcceptanceDuty(int port, int originalDuty)
     {
         link.Write(Protocols.SetDuty(port, originalDuty));
         Thread.Sleep(1500);
         var reading = Read(port);
-        if (reading.Duty != originalDuty) throw new IOException("Original duty was not confirmed; keeping the port managed for safe disposal.");
-        managed.Remove(port);
+        if (reading.Duty != originalDuty) throw new IOException("Original duty was not confirmed; the controller will request the captured baseline on disposal.");
+        original.Remove(port);
         return reading;
     }
     public void Dispose()
     {
-        // USB controller has no documented BIOS hand-back command. Leave managed ports at 100%.
-        foreach (int port in managed) { try { link.Write(Protocols.SetDuty(port, 100)); } catch { } }
+        // Stop/test completion is not an over-temperature event. Restore captured
+        // duty instead of leaving a synthetic 100% "safety" command behind.
+        // A genuinely critical temperature retains the active emergency duty.
+        if (!retainCriticalDuty)
+            foreach (var (port, duty) in original) { try { link.Write(Protocols.SetDuty(port, duty)); } catch { } }
         link.Dispose();
     }
 }
