@@ -19,6 +19,10 @@ Check(safety.Evaluate(port, Tele(-5), now, 2).Duty is null, "implausible CPU sen
 Check(safety.Evaluate(port, Tele(40, double.PositiveInfinity), now, 2).Duty is null, "invalid max-source GPU");
 Check(safety.Evaluate(port, Tele() with { Time = now.AddSeconds(-6) }, now, 2).Duty is null, "stale data releases without a full-speed command");
 Check(safety.Evaluate(port, Tele() with { Time = now.AddSeconds(10) }, now, 2).Duty is null, "future data rejected");
+Check(!FanSafety.IsCritical(Tele(150), now), "implausible sentinel cannot force emergency duty on close");
+Check(!FanSafety.IsCritical(Tele(90) with { Time = now.AddSeconds(-6) }, now), "stale hot sample cannot force emergency duty on close");
+Check(!FanSafety.IsCritical(Tele(90) with { Time = now.AddSeconds(2) }, now), "future hot sample cannot force emergency duty on close");
+Check(FanSafety.IsCritical(Tele(null, 90), now), "valid fresh GPU overheat is a real emergency even if CPU is unavailable");
 port.Mode = ControlMode.Fixed; port.FixedDuty = 30; port.Role = PortRole.Pump; safety.Reset();
 Check(safety.Evaluate(port, Tele(), now, 2).Duty == 60, "pump hard minimum");
 Check(safety.Evaluate(port, Tele(null), now, 2).Duty is null, "fixed-mode CPU missing releases control");

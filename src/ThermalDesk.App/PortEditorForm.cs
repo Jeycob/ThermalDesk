@@ -15,7 +15,7 @@ internal sealed class PortEditorForm : Form
     private readonly Label status = new() { AutoSize = true };
     private readonly CurveCanvas chart;
     public PortSettings Result { get; private set; }
-    public PortEditorForm(PortSettings settings)
+    public PortEditorForm(PortSettings settings, Func<Telemetry>? telemetry = null, string fallbackColor = "23D6BA")
     {
         initial = settings.Copy(); Result = settings.Copy(); Text = $"Port {settings.Port} · Cooling and lighting";
         Font = new Font("Segoe UI", 10); BackColor = Color.FromArgb(16, 25, 38); ForeColor = Color.White; ClientSize = new(950, 690); MinimumSize = new(900, 650); StartPosition = FormStartPosition.CenterParent;
@@ -29,11 +29,14 @@ internal sealed class PortEditorForm : Form
         role.SelectedIndexChanged += (_, _) => { bool pump = (string)role.SelectedItem! == nameof(PortRole.Pump); minimum.Minimum = fixedDuty.Minimum = pump ? 60 : 30; if (minimum.Value < minimum.Minimum) minimum.Value = minimum.Minimum; if (fixedDuty.Value < fixedDuty.Minimum) fixedDuty.Value = fixedDuty.Minimum; };
         portName.Text = settings.Name;
         root.Controls.Add(fields, 0, 1);
-        var graphPanel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2 }; graphPanel.RowStyles.Add(new(SizeType.Percent, 65)); graphPanel.RowStyles.Add(new(SizeType.Percent, 35));
+        var graphPanel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3 };
+        graphPanel.RowStyles.Add(new(SizeType.Absolute, 45)); graphPanel.RowStyles.Add(new(SizeType.Percent, 65)); graphPanel.RowStyles.Add(new(SizeType.Percent, 35));
         points.Dock = DockStyle.Fill; points.AllowUserToAddRows = false; points.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; points.RowHeadersVisible = false; points.BackgroundColor = BackColor;
         points.DefaultCellStyle.BackColor = Color.FromArgb(22, 34, 48); points.DefaultCellStyle.ForeColor = Color.White; points.DefaultCellStyle.SelectionBackColor = Color.FromArgb(35, 80, 94); points.DefaultCellStyle.SelectionForeColor = Color.White; points.EnableHeadersVisualStyles = false; points.ColumnHeadersDefaultCellStyle.BackColor = BackColor; points.ColumnHeadersDefaultCellStyle.ForeColor = Color.Silver;
         points.Columns.Add("Temperature", "Temperature °C"); points.Columns.Add("Duty", "Duty %"); foreach (var p in settings.Curve) points.Rows.Add(p.Temperature, p.Duty);
-        chart = new CurveCanvas(ReadPoints, SetPoint); graphPanel.Controls.Add(chart, 0, 0); graphPanel.Controls.Add(points, 0, 1); root.Controls.Add(graphPanel, 1, 1);
+        chart = new CurveCanvas(ReadPoints, SetPoint);
+        graphPanel.Controls.Add(new RgbPreview(Read, telemetry ?? (() => new Telemetry(DateTimeOffset.UtcNow, null, null, null, null, null)), fallbackColor) { Dock = DockStyle.Fill }, 0, 0);
+        graphPanel.Controls.Add(chart, 0, 1); graphPanel.Controls.Add(points, 0, 2); root.Controls.Add(graphPanel, 1, 1);
         points.CellValueChanged += (_, _) => chart.Invalidate(); points.RowsRemoved += (_, _) => chart.Invalidate(); points.DataError += (_, e) => { e.ThrowException = false; status.Text = "Enter numeric curve values."; };
         var help = new FlowLayoutPanel { Dock = DockStyle.Fill };
         foreach (var preset in Enum.GetValues<FanPreset>())

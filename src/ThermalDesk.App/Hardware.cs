@@ -138,6 +138,7 @@ internal sealed class FanController : IFanController
     private readonly int inputLength;
     private readonly Dictionary<int, int> original = [];
     private bool retainCriticalDuty;
+    private int disposed;
     public long SkippedReports { get; private set; }
     internal FanController(IFanLink transport, int reportLength)
     {
@@ -189,11 +190,14 @@ internal sealed class FanController : IFanController
     }
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         // Stop/test completion is not an over-temperature event. Restore captured
         // duty instead of leaving a synthetic 100% "safety" command behind.
         // A genuinely critical temperature retains the active emergency duty.
+        var failed = new List<int>();
         if (!retainCriticalDuty)
-            foreach (var (port, duty) in original) { try { link.Write(Protocols.SetDuty(port, duty)); } catch { } }
+            foreach (var (port, duty) in original) { try { link.Write(Protocols.SetDuty(port, duty)); } catch { failed.Add(port); } }
         link.Dispose();
+        if (failed.Count > 0) throw new IOException("Could not restore captured duty on port(s) " + string.Join(", ", failed) + ". Restore and verify the vendor controller; no fallback full-speed command was sent.");
     }
 }

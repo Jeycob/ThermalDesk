@@ -55,8 +55,8 @@ internal static class WidgetChecks
             var live = new Engine(_ => { Interlocked.Increment(ref opens); return control; }, () => t with { Time = DateTimeOffset.UtcNow }, () => []);
             live.Start(cooling, true); Thread.Sleep(400);
             var changed = cooling.Copy(); FanPresets.Apply(changed.Ports[0], FanPreset.Full); live.ApplyLiveSettings(changed);
-            Thread.Sleep(2200);
-            Check(opens == 1 && control.LastDuty == 100, "Live Full preset applies without reopening controller");
+            SpinWait.SpinUntil(() => Volatile.Read(ref control.LastDuty) == 100 || live.ControllerFault, 5000);
+            Check(opens == 1 && control.LastDuty == 100, $"Live Full preset applies without reopening controller (opens={opens}, duty={control.LastDuty}, fault={live.ControllerFault}, log={string.Join("; ", live.Logs)})");
             Check(control.FirstDuty is >= 30 and < 100, "Healthy initial telemetry uses the curve, not an unconditional 100% burst");
             bool topologyBlocked = false; changed.Ports[1].Role = PortRole.Fan; changed.Ports[1].Mode = ControlMode.Curve;
             try { live.ApplyLiveSettings(changed); } catch (InvalidOperationException) { topologyBlocked = true; }
@@ -84,6 +84,16 @@ internal static class WidgetChecks
             bool refused = false;
             try { using var controller = new FanController(unavailable, 65); controller.SetDuty(1, 60); } catch (IOException) { refused = true; }
             Check(refused && unavailable.Duties.Count == 0, "Unavailable baseline prevents takeover and sends no fallback 100%");
+            var releaseFailure = new TestFanLink { FailRestore = true }; bool reportedReleaseFailure = false;
+            try { using var controller = new FanController(releaseFailure, 65); controller.SetDuty(1, 60); }
+            catch (IOException e) { reportedReleaseFailure = e.Message.Contains("Could not restore") && e.Message.Contains("1"); }
+            Check(reportedReleaseFailure && !releaseFailure.Duties.Contains(100), "Failed release is reported, never hidden by a fallback 100% write");
+            int invalidOpens = 0;
+            var invalidStart = new Engine(_ => { invalidOpens++; return new TestController(); }, () => t with { Time = DateTimeOffset.UtcNow, CpuTemperature = null }, () => []);
+            invalidStart.Start(cooling, true);
+            SpinWait.SpinUntil(() => invalidStart.ControllerFault, 2000);
+            Check(invalidStart.ControllerFault && invalidOpens == 0, "Unavailable initial CPU prevents hardware access instead of full-speed fallback");
+            Task.Run(async () => await invalidStart.Stop()).GetAwaiter().GetResult();
             var conflict = new Engine(_ => throw new InvalidOperationException("Must not open a device"), () => t, () => ["TTRGBPlus"]);
             bool blocked = false; try { conflict.Start(rgbSettings, true); } catch (InvalidOperationException) { blocked = true; }
             Check(blocked && !conflict.Running, "Conflicting vendor process must block before device access.");
@@ -136,12 +146,14 @@ internal static class WidgetChecks
         private int duty = 40;
         public List<int> Duties { get; } = [];
         public bool FailRead;
+        public bool FailRestore;
         public void Write(byte[] packet)
         {
             if (packet[1] == 0x33 && packet[2] == 0x51) replies.Enqueue([0, 0x33, 0x51, packet[3], 0, (byte)duty, 0xe8, 3]);
             else
             {
-                if (packet[1] == 0x32 && packet[2] == 0x51) { duty = packet[5]; Duties.Add(duty); }
+                if (packet[1] == 0x32 && packet[2] == 0x51)
+                { if (FailRestore && packet[5] == 40) throw new IOException("Injected restore failure"); duty = packet[5]; Duties.Add(duty); }
                 replies.Enqueue([0, packet[1], packet[2], packet[3], 0, 0, 0, 0]);
             }
         }

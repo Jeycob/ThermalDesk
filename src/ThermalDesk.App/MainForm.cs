@@ -171,7 +171,7 @@ internal sealed class MainForm : Form
             if (e.RowIndex < 0 || e.ColumnIndex != 9) return;
             try
             {
-                ports.EndEdit(); var row = ports.Rows[e.RowIndex]; using var editor = new PortEditorForm(ReadPort(row));
+                ports.EndEdit(); var row = ports.Rows[e.RowIndex]; using var editor = new PortEditorForm(ReadPort(row), () => engine.Latest, color.Text);
                 if (editor.ShowDialog(this) != DialogResult.OK) return;
                 var p = editor.Result; portDesign[p.Port] = p.Copy();
                 row.SetValues(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount, string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));

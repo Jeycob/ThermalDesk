@@ -75,6 +75,7 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 - Image/GIF fitting preserves aspect ratio. GIF frames are sampled at the configured refresh rate; no video decoder runs in the background.
 - Per-port Preserve / Fixed / Curve cooling, Silent / Custom / Full presets, named locations, draggable curve points, TT nine-point curve import, fan/pump roles, minimum speeds, CPU/GPU sensor selection and optional read-only RPM feedback.
 - Per-port Static, Breathing, Blink, ColorCycle, RainbowWave and Temperature RGB effects. Color, brightness, LED count and period are editable. Animations are capped at 5 FPS; thermal decisions run first.
+- The port editor shows a live preview of its planned RGB frame. It is not a claim of physical LED feedback; close the editor to accept and automatically apply the change.
 - JSON profiles, bounded in-memory log, diagnostics export, tray operation and opt-in preview or elevated saved-live sign-in startup.
 - Latest-snapshot telemetry and separate device loops: a stalled display does not block fan control. No thread per sensor, fan, or LED.
 
@@ -91,6 +92,7 @@ Managed channels:
 - Cooling increases are immediate. Decreases are limited to 3 percentage points/second and use 2 °C downward hysteresis.
 - Repeated zero-RPM readings or a detected controller error → request the captured original duty if USB still works, close and latch the fault. No forced 100% fallback or automatic reconnect loop. Resolve the cause and restore vendor control before retrying.
 - Normal stop/exit requests each managed port's captured original duty. It does not restore a firmware curve. Only a genuine critical-temperature condition retains emergency cooling; Full and high-temperature curve requests remain explicit operations.
+- Failed restoration is reported in the controller log, not silently treated as success and not replaced with an automatic full-speed command.
 
 **A killed/frozen process, lost USB connection, driver fault, power loss or pre-login interval cannot be made safe by a process-exit handler.** No hardware watchdog has been verified. Keep BIOS/firmware cooling and thermal protection independent of this experimental software. Do not assume an exit-time request succeeded after hardware failure. Do not lower pump speed based only on its name or temperature readings.
 

@@ -175,3 +175,13 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   debounce. Device/wiring changes remain pending until explicitly stopped/rearmed.
   Silent/Custom/Full quick buttons affect managed fans only. Custom restores the
   retained original custom curve instead of replacing it with Silent permanently.
+
+0.3.4 MOCK-ONLY FOLLOW-UP
+- Emergency close policy now uses the same fresh/plausible 85..115 C test as
+  runtime safety. Stale, future or implausible hot sentinels cannot inject a
+  synthetic full-speed command during release.
+- Added a no-USB engine test: unavailable initial CPU data must not even open
+  the controller. Existing vendor control is left untouched.
+- Port editor now previews the exact planned RGB frame/LED count/effect at 4 FPS
+  while visible. This is explicitly not physical LED readback. No live launch
+  or fan/RGB hardware test is part of this follow-up.

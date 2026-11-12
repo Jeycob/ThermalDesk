@@ -257,8 +257,10 @@ internal sealed class Engine
                     if (controller is not null)
                     {
                         var t = Latest;
-                        controller.PrepareToClose(t.CpuTemperature >= 85 || t.GpuTemperature >= 85);
-                        controller.Dispose();
+                        controller.PrepareToClose(FanSafety.IsCritical(t, DateTimeOffset.UtcNow));
+                        try { controller.Dispose(); }
+                        catch (Exception releaseError)
+                        { controllerFault = true; SetStatus("Controller", "FAULT · " + releaseError.Message); throw; }
                     }
                 }
             }

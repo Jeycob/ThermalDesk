@@ -12,8 +12,8 @@ public sealed class FanSafety
         // Zero/sentinel readings from an inaccessible sensor must not look like an idle CPU.
         bool Valid(double? v) => v.HasValue && double.IsFinite(v.Value) && v.Value is >= 5 and <= 115;
         if (now - t.Time > TimeSpan.FromSeconds(5) || t.Time > now + TimeSpan.FromSeconds(1)) return Release("Stale telemetry");
+        if (IsCritical(t, now)) return Full("Critical temperature");
         if (!Valid(t.CpuTemperature)) return Release("CPU sensor unavailable");
-        if (t.CpuTemperature >= 85 || (Valid(t.GpuTemperature) && t.GpuTemperature >= 85)) return Full("Critical temperature");
         double? temperature = p.Source switch
         {
             TemperatureSource.Cpu => t.CpuTemperature,
@@ -38,6 +38,12 @@ public sealed class FanSafety
     }
     private FanDecision Full(string reason) { previous = 100; heldTemperature = null; return new(100, reason); }
     private FanDecision Release(string reason) => new(null, reason + " · release software control; do not force full speed");
+    public static bool IsCritical(Telemetry t, DateTimeOffset now)
+    {
+        bool ValidHot(double? value) => value.HasValue && double.IsFinite(value.Value) && value.Value is >= 85 and <= 115;
+        return now - t.Time <= TimeSpan.FromSeconds(5) && t.Time - now <= TimeSpan.FromSeconds(1) &&
+            (ValidHot(t.CpuTemperature) || ValidHot(t.GpuTemperature));
+    }
     public void Reset() { previous = heldTemperature = null; }
     public static double Interpolate(IReadOnlyList<CurvePoint> points, double value)
     {
