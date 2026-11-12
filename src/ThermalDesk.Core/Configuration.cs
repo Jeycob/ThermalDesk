@@ -16,9 +16,18 @@ public sealed record Telemetry(DateTimeOffset Time, double? CpuTemperature, doub
 {
     public double? GpuHotSpotTemperature { get; init; }
     public double? GpuMemoryTemperature { get; init; }
+    public double? CpuMaximumTemperature { get; init; }
     public IReadOnlyList<FanReading> Fans { get; init; } = [];
+    public string CpuTemperatureSource { get; init; } = "";
+    public string CpuMaximumTemperatureSource { get; init; } = "";
+    public string GpuTemperatureSource { get; init; } = "";
+    public string MemoryLoadSource { get; init; } = "";
+    public string GpuDeviceId { get; init; } = "";
+    public string GpuDeviceName { get; init; } = "";
+    public IReadOnlyList<GpuDeviceInfo> GpuDevices { get; init; } = [];
 }
 public sealed record FanReading(int Port, int Rpm, int Duty);
+public sealed record GpuDeviceInfo(string Id, string Name);
 
 public sealed class PortSettings
 {
@@ -87,6 +96,7 @@ public sealed class Settings
     public bool CoolingWiringConfirmed { get; set; }
     public bool RgbEnabled { get; set; }
     public bool MonitorFanController { get; set; }
+    public string PreferredGpuId { get; set; } = "";
     public bool StartLiveAtSignIn { get; set; }
     public string RgbColor { get; set; } = "23D6BA";
     public string ControllerSerial { get; set; } = "";
@@ -98,6 +108,7 @@ public sealed class Settings
     {
         if (SchemaVersion != 1) throw new ArgumentException("Unsupported configuration version.");
         if (PollSeconds is < 1 or > 10) throw new ArgumentException("Polling must be 1–10 seconds.");
+        if (PreferredGpuId is null || PreferredGpuId.Length > 200 || PreferredGpuId.Any(char.IsControl)) throw new ArgumentException("GPU identifier must be at most 200 printable characters.");
         if (Ports.Count != 5 || !Ports.Select(p => p.Port).Order().SequenceEqual(Enumerable.Range(1, 5)))
             throw new ArgumentException("Exactly five distinct controller ports (1–5) are required.");
         if (RgbColor.Length != 6 || !RgbColor.All(Uri.IsHexDigit)) throw new ArgumentException("RGB color must be six hexadecimal digits.");

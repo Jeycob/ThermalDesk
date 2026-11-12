@@ -67,7 +67,7 @@ internal sealed class WidgetDesignerForm : Form
     private bool Commit()
     {
         string? selectedId = Selected?.Id;
-        try { WidgetLayout.Validate(working, physicalWidth, physicalHeight); valid = working.Copy(); status.ForeColor = Color.FromArgb(38, 218, 179); status.Text = $"{working.Widgets.Count}/40 widgets · Preview only · Save profile in the main window to persist."; Rebind(selectedId); return true; }
+        try { WidgetLayout.Validate(working, physicalWidth, physicalHeight); valid = working.Copy(); status.ForeColor = Color.FromArgb(38, 218, 179); status.Text = $"{working.Widgets.Count}/40 widgets · Preview until Apply layout · then saved/applied automatically."; Rebind(selectedId); return true; }
         catch (ArgumentException e) { working = valid.Copy(); Rebind(selectedId); status.ForeColor = Color.Orange; status.Text = e.Message; return false; }
     }
     private void Add()
@@ -219,6 +219,7 @@ internal sealed class WidgetProperties(LcdWidget widget)
             widget.TextTemplate = value switch
             {
                 WidgetSource.CpuTemperature => "CPU {value} °C", WidgetSource.GpuTemperature => "GPU {value} °C",
+                WidgetSource.CpuMaximumTemperature => "CPU MAX {value} °C",
                 WidgetSource.GpuHotSpotTemperature => "GPU HOTSPOT {value} °C", WidgetSource.GpuMemoryTemperature => "GPU MEMORY {value} °C",
                 WidgetSource.CpuLoad => "CPU {value}%", WidgetSource.GpuLoad => "GPU {value}%", WidgetSource.MemoryUsedPercent => "RAM {value}%",
                 WidgetSource.FanRpm => "FAN {value} RPM", WidgetSource.FanDuty => "FAN {value}%", WidgetSource.Clock or WidgetSource.Date => "{value}", _ => widget.TextTemplate

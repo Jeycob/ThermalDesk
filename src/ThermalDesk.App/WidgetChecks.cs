@@ -17,6 +17,20 @@ internal static class WidgetChecks
         void Check(bool value, string message) { count++; if (!value) throw new InvalidOperationException(message); }
         try
         {
+            foreach (var sample in new (WidgetSource Source, string Text, string Format)[]
+            {
+                (WidgetSource.CpuTemperature, "CPU {value} °C", "0.0"), (WidgetSource.CpuMaximumTemperature, "CPU MAX {value} °C", "0.0"),
+                (WidgetSource.GpuTemperature, "GPU {value} °C", "0.0"), (WidgetSource.GpuHotSpotTemperature, "GPU HOTSPOT {value} °C", "0.0"),
+                (WidgetSource.GpuMemoryTemperature, "GPU MEMORY {value} °C", "0.0"), (WidgetSource.CpuLoad, "CPU {value}%", "0"),
+                (WidgetSource.GpuLoad, "GPU {value}%", "0"), (WidgetSource.MemoryUsedPercent, "RAM {value}%", "0"),
+                (WidgetSource.FanRpm, "FAN {value} RPM", "0"), (WidgetSource.FanDuty, "FAN {value}%", "0"),
+                (WidgetSource.Clock, "{value}", "HH:mm:ss"), (WidgetSource.Date, "{value}", "yyyy-MM-dd")
+            })
+            {
+                var widget = new LcdWidget { TextTemplate = "Previous unit must not survive a source change" }; var adapter = new WidgetProperties(widget); adapter.Source = sample.Source;
+                Check(widget.TextTemplate == sample.Text, "Source change supplies the correct default label/unit: " + sample.Source);
+                Check(widget.ValueFormat == sample.Format, "Source change supplies the correct numeric/time format: " + sample.Source);
+            }
             foreach (var size in new[] { (480, 128), (480, 480) })
             foreach (int rotation in new[] { 0, 90, 180, 270 })
             {
@@ -39,6 +53,13 @@ internal static class WidgetChecks
             using (var form = new MainForm(restored, path)) form.RenderPreview(Path.Combine(directory, "main-widgets.png"));
             using (var form = new MainForm(new Settings(), Path.Combine(directory, "automatic-settings.json"))) count += form.ExerciseAutomaticSettingsForTest();
             using (var form = new PortEditorForm(new PortSettings { Port = 1 })) count += form.ExerciseForTest(Path.Combine(directory, "port-editor.png"));
+            var sourceTelemetry = t with { CpuTemperatureSource = "Core (Tctl/Tdie)", CpuMaximumTemperatureSource = "CPU CCD1 (Tdie)", GpuDeviceId = "rtx", GpuDeviceName = "NVIDIA RTX 4080", GpuTemperatureSource = "GPU Core", MemoryLoadSource = "Memory", GpuDevices = [new("rtx", "NVIDIA RTX 4080"), new("igpu", "Integrated AMD")] };
+            using (var sourceForm = new Form { ClientSize = new Size(900, 500), Font = new Font("Segoe UI", 10), StartPosition = FormStartPosition.Manual, Location = new Point(-20000, -20000), ShowInTaskbar = false })
+            {
+                var selector = new SensorSelector("missing-saved-gpu", () => sourceTelemetry); sourceForm.Controls.Add(selector);
+                count += selector.ExerciseForTest(); sourceForm.Show(); sourceForm.PerformLayout(); Application.DoEvents();
+                using var image = new Bitmap(sourceForm.Width, sourceForm.Height); sourceForm.DrawToBitmap(image, new Rectangle(Point.Empty, sourceForm.Size)); image.Save(Path.Combine(directory, "sensor-selector.png"), ImageFormat.Png);
+            }
             var allFans = new Settings { CoolingEnabled = true, CoolingWiringConfirmed = true, PollSeconds = 10 };
             foreach (var port in allFans.Ports) { port.Role = PortRole.Fan; port.Mode = ControlMode.Fixed; port.FixedDuty = 65; port.MinimumDuty = 30; port.Curve = [new(20, 45), new(100, 45)]; }
             Check(Engine.SensorInterval(allFans) == 2, "Active cooling keeps telemetry fresh even when general polling is ten seconds");

@@ -11,36 +11,30 @@ internal sealed class Monitoring : IDisposable
         try { computer.Open(); }
         catch { computer.Close(); throw; }
     }
-    public Telemetry Read()
+    public Telemetry Read(string preferredGpuId = "")
     {
-        var sensors = new List<(HardwareType Kind, ISensor Sensor)>();
-        void Visit(IHardware h)
+        var devices = new List<HardwareSnapshot>();
+        void Visit(IHardware h, List<SensorReading> sensors)
         {
-            h.Update(); foreach (var s in h.Sensors) sensors.Add((h.HardwareType, s));
-            foreach (var sub in h.SubHardware) Visit(sub);
+            h.Update();
+            foreach (var s in h.Sensors)
+                if (s.SensorType is SensorType.Temperature or SensorType.Load)
+                    sensors.Add(new(s.Name, s.SensorType == SensorType.Temperature ? SensorMetric.Temperature : SensorMetric.Load, s.Value));
+            foreach (var sub in h.SubHardware) Visit(sub, sensors);
         }
-        foreach (var h in computer.Hardware) Visit(h);
-        double? Maximum(Func<(HardwareType Kind, ISensor Sensor), bool> predicate)
+        foreach (var h in computer.Hardware)
         {
-            var a = sensors.Where(predicate).Where(x => x.Sensor.Value.HasValue && float.IsFinite(x.Sensor.Value.Value)).Select(x => (double)x.Sensor.Value!.Value).ToArray();
-            return a.Length == 0 ? null : a.Max();
+            DeviceCategory? kind = h.HardwareType switch
+            {
+                HardwareType.Cpu => DeviceCategory.Cpu, HardwareType.GpuNvidia => DeviceCategory.NvidiaGpu,
+                HardwareType.GpuAmd => DeviceCategory.AmdGpu, HardwareType.GpuIntel => DeviceCategory.IntelGpu,
+                HardwareType.Memory => DeviceCategory.Memory, _ => null
+            };
+            if (kind is null) continue;
+            var sensors = new List<SensorReading>(); Visit(h, sensors);
+            devices.Add(new(h.Identifier.ToString(), h.Name, kind.Value, sensors));
         }
-        var cpuRaw = Maximum(x => x.Kind == HardwareType.Cpu && x.Sensor.SensorType == SensorType.Temperature);
-        static bool IsGpuTemperature((HardwareType Kind, ISensor Sensor) x) => x.Kind is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel && x.Sensor.SensorType == SensorType.Temperature;
-        var gpuRaw = Maximum(x => IsGpuTemperature(x) && x.Sensor.Name.Contains("Core", StringComparison.OrdinalIgnoreCase))
-            ?? Maximum(x => IsGpuTemperature(x) && !x.Sensor.Name.Contains("Hot", StringComparison.OrdinalIgnoreCase) && !x.Sensor.Name.Contains("Memory", StringComparison.OrdinalIgnoreCase));
-        var gpuHotSpot = Maximum(x => IsGpuTemperature(x) && x.Sensor.Name.Contains("Hot", StringComparison.OrdinalIgnoreCase));
-        var gpuMemory = Maximum(x => IsGpuTemperature(x) && x.Sensor.Name.Contains("Memory", StringComparison.OrdinalIgnoreCase));
-        // Unsupported kernel access can expose a zero-valued sentinel sensor.
-        // Never present that as a real reading or silently enable a normal fan curve.
-        double? cpu = cpuRaw is >= 5 and <= 115 ? cpuRaw : null;
-        double? gpu = gpuRaw is >= 5 and <= 115 ? gpuRaw : null;
-        var cpuLoad = Maximum(x => x.Kind == HardwareType.Cpu && x.Sensor.SensorType == SensorType.Load && x.Sensor.Name.Contains("Total", StringComparison.OrdinalIgnoreCase));
-        var gpuLoad = Maximum(x => x.Kind is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel && x.Sensor.SensorType == SensorType.Load && x.Sensor.Name.Contains("Core", StringComparison.OrdinalIgnoreCase));
-        var mem = Maximum(x => x.Kind == HardwareType.Memory && x.Sensor.SensorType == SensorType.Load);
-        return new(DateTimeOffset.UtcNow, cpu, gpu, cpuLoad, gpuLoad, mem,
-            cpu.HasValue ? "" : "CPU temperature unavailable. Check supported LHM/PawnIO setup; cooling falls back to 100%.")
-        { GpuHotSpotTemperature = gpuHotSpot, GpuMemoryTemperature = gpuMemory };
+        return SensorProjection.Project(devices, DateTimeOffset.UtcNow, preferredGpuId);
     }
     public void Dispose() => computer.Close();
 }

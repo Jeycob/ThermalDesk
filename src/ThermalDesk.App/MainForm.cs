@@ -27,6 +27,7 @@ internal sealed class MainForm : Form
     private readonly CheckBox cooling = new() { Text = "Enable USB fan/pump control" }, wiring = new() { Text = "I verified every managed port and independent hardware protection" }, rgb = new() { Text = "Enable RGB on selected ports" };
     private readonly NumericUpDown poll = new() { Minimum = 1, Maximum = 10, Width = 70 };
     private readonly DisplayEditor panelEditor, aioEditor;
+    private readonly SensorSelector sensorSelector;
     private readonly FrameRenderer panelRenderer = new(), aioRenderer = new();
     private readonly Button liveButton;
     private bool busy, exiting, smokeMode;
@@ -100,6 +101,8 @@ internal sealed class MainForm : Form
         panelEditor = new("3.9-inch LCD · 264A:233D", settings.Panel, 480, 128, () => engine.Latest); aioEditor = new("TOUGHLIQUID AX · 264A:2328", settings.Aio, 480, 480, () => engine.Latest);
         displayLayout.Controls.Add(panelEditor, 0, 0); displayLayout.Controls.Add(aioEditor, 1, 0);
         displayLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Muted, Text = "Images: JPEG, PNG, GIF, BMP / up to 25 MiB. GIF playback is capped at the display refresh rate.\nScreen mode sends the primary desktop to the LCD only when you explicitly start live control. No network server or cloud." }, 0, 1); displayLayout.SetColumnSpan(displayLayout.GetControlFromPosition(0, 1)!, 2);
+        var sensorsPage = Page(tabs, "Sensors");
+        sensorSelector = new SensorSelector(initial.PreferredGpuId, () => engine.Latest); sensorsPage.Controls.Add(sensorSelector); sensorSelector.SettingsChanged += QueueSettingsApply;
         var logsPage = Page(tabs, "Log + diagnostics"); ConfigureText(log); logsPage.Controls.Add(log);
         var diag = Button("Export diagnostics", ExportDiagnostics); diag.Dock = DockStyle.Bottom; logsPage.Controls.Add(diag); diag.BringToFront();
         var about = Page(tabs, "About");
@@ -204,7 +207,7 @@ internal sealed class MainForm : Form
     private Settings ReadSettings()
     {
         ports.EndEdit();
-        var s = new Settings { PollSeconds = (int)poll.Value, CoolingEnabled = cooling.Checked, CoolingWiringConfirmed = wiring.Checked, RgbEnabled = rgb.Checked, MonitorFanController = monitorFans.Checked, StartLiveAtSignIn = settings.StartLiveAtSignIn, RgbColor = color.Text.Trim().TrimStart('#'), ControllerSerial = serial.Text.Trim(), Panel = panelEditor.Read(), Aio = aioEditor.Read() };
+        var s = new Settings { PollSeconds = (int)poll.Value, PreferredGpuId = sensorSelector.Read(), CoolingEnabled = cooling.Checked, CoolingWiringConfirmed = wiring.Checked, RgbEnabled = rgb.Checked, MonitorFanController = monitorFans.Checked, StartLiveAtSignIn = settings.StartLiveAtSignIn, RgbColor = color.Text.Trim().TrimStart('#'), ControllerSerial = serial.Text.Trim(), Panel = panelEditor.Read(), Aio = aioEditor.Read() };
         s.Ports = ports.Rows.Cast<DataGridViewRow>().Select(ReadPort).ToList(); s.Validate(); return s;
     }
     private void ApplyFanPreset(FanPreset preset)
@@ -274,10 +277,12 @@ internal sealed class MainForm : Form
     {
         var t = engine.Latest;
         static string Temp(double? x) => x.HasValue ? $"{x:0.0} °C" : "Unavailable";
-        cpu.Text = $"CPU\n{Temp(t.CpuTemperature)}   ·   {t.CpuLoad:0}% load";
+        static string Load(double? x) => x.HasValue && double.IsFinite(x.Value) && x is >= 0 and <= 100 ? $"{x:0}% load" : "Load unavailable";
+        cpu.Text = $"CPU\n{Temp(t.CpuTemperature)}   ·   {Load(t.CpuLoad)}";
         if (engine.Live && !t.CpuTemperature.HasValue && !StartupManager.Elevated) cpu.Text = "CPU\nUnavailable · restart as admin";
-        gpu.Text = $"GPU\n{Temp(t.GpuTemperature)}   ·   {t.GpuLoad:0}% load";
-        memory.Text = $"MEMORY\n{t.MemoryUsedPercent:0}% used";
+        gpu.Text = $"GPU\n{Temp(t.GpuTemperature)}   ·   {Load(t.GpuLoad)}";
+        memory.Text = $"MEMORY\n{(t.MemoryUsedPercent.HasValue ? $"{t.MemoryUsedPercent:0}% physical used" : "Unavailable")}";
+        sensorSelector.UpdateTelemetry();
         session.Text = engine.Cancelled ? "SESSION CANCELLED · see log · press Stop before reconnecting" : engine.Running ? (engine.Live ? "LIVE · hardware session" : "PREVIEW · simulated data · hardware writes disabled") : "STOPPED";
         session.ForeColor = engine.Live ? Color.FromArgb(255, 194, 100) : Accent;
         liveButton.Text = engine.Running && engine.Live ? "Live · automatic" : "Start live control";
@@ -294,8 +299,8 @@ internal sealed class MainForm : Form
             Update(10, requested); Update(11, hasReading ? reading!.Duty.ToString(CultureInfo.InvariantCulture) : "—"); Update(12, hasReading ? reading!.Rpm.ToString(CultureInfo.InvariantCulture) : "—");
         }
         log.Text = string.Join(Environment.NewLine, engine.Logs);
-        try { var a = panelRenderer.Render(t, settings.Panel, 480, 128); var old = panelPreview.Image; panelPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · panel preview: " + e.Message; }
-        try { var a = aioRenderer.Render(t, settings.Aio, 480, 480); var old = aioPreview.Image; aioPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · AIO preview: " + e.Message; }
+        if (panelPreview.Visible) try { var a = panelRenderer.Render(t, settings.Panel, 480, 128); var old = panelPreview.Image; panelPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · panel preview: " + e.Message; }
+        if (aioPreview.Visible) try { var a = aioRenderer.Render(t, settings.Aio, 480, 480); var old = aioPreview.Image; aioPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · AIO preview: " + e.Message; }
         using var p = Process.GetCurrentProcess();
         var now = DateTime.UtcNow; double elapsed = (now - lastResource).TotalSeconds;
         double percent = elapsed > 0 ? (p.TotalProcessorTime - lastCpu).TotalSeconds / elapsed / Environment.ProcessorCount * 100 : 0;
@@ -468,6 +473,7 @@ internal sealed class MainForm : Form
             RefreshData();
             Verify(row.Cells[10].Value!.ToString()!.Contains("→ 30") && row.Cells[12].Value!.ToString() != "—", "requested target and RPM visible");
             Verify(!settingsDelay.Enabled, "read-only feedback does not schedule another configuration apply");
+            Verify(panelPreview.Image is null && aioPreview.Image is null, "hidden LCD previews do not render while editing cooling");
             Descendants(this).OfType<Button>().Single(b => b.Text == "Custom").PerformClick();
             WaitFor(() => engine.FanCommands.Values.All(c => c.TargetDuty == 45));
             Verify(SettingsStore.Load(configPath).Ports.All(p => p.Curve.All(point => point.Duty == 45)), "Custom restores every original curve");

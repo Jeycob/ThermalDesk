@@ -212,3 +212,22 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   interval. Sensor-only/display sessions retain their selected polling interval.
 - This release is staged only. The sleeping operator's running old candidate,
   current Silent configuration, fans, RGB and LCDs are not changed or restarted.
+
+0.3.7 SOFTWARE-ONLY FOLLOW-UP
+- Sensor projection is now a pure, tested component. GPU core/hotspot/VRAM/load
+  come from one selected device, not independent maxima across NVIDIA and AMD.
+  Automatic prefers NVIDIA; an explicitly pinned missing GPU never falls back.
+- Added a native Sensors selector and provenance readout. Discovery refreshes
+  preserve the selected identifier and cannot trigger an automatic profile apply.
+- CPU package/Tctl-Tdie is separate from maximum actual CPU sensor temperature.
+  The maximum still participates in genuine critical-heat protection and can be
+  selected as an LCD widget. Distance-to-TjMax/margin readings are excluded.
+- Physical RAM usage no longer takes the maximum of physical/virtual memory.
+  Missing loads display as unavailable, not an unlabeled blank percentage.
+- Removed the stale sensor warning claiming a forced 100% fallback; behavior and
+  message now agree. Real measured critical heat remains a separate condition.
+- Hidden LCD previews are not rendered on the cooling tab; mock UI verifies this.
+- Sensor fixtures cover a hotter integrated AMD GPU alongside an RTX 4080,
+  missing pinned devices, sentinel values, loads, provenance and critical heat.
+- New mapping has not been physically accepted on the target. No live launch,
+  sensor/hardware test, controller change, profile replacement or startup task.

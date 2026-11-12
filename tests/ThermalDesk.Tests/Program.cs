@@ -214,4 +214,37 @@ Check(WidgetLayout.GaugeFraction(gauge, Tele(150)) == 1 && WidgetLayout.GaugeFra
 gauge.GaugeMaximum = 0; Throws(() => WidgetLayout.Validate(gaugeDisplay, 480, 480), "zero gauge range rejected"); gauge.GaugeMaximum = 100;
 gauge.Source = WidgetSource.Clock; Throws(() => WidgetLayout.Validate(gaugeDisplay, 480, 480), "non-numeric gauge source rejected"); gauge.Source = WidgetSource.CpuTemperature;
 gauge.GaugeThickness = float.NaN; Throws(() => WidgetLayout.Validate(gaugeDisplay, 480, 480), "nonfinite gauge geometry rejected");
+var sensorDevices = new HardwareSnapshot[]
+{
+    new("cpu", "Ryzen", DeviceCategory.Cpu, [new("Core (Tctl/Tdie)", SensorMetric.Temperature, 60), new("CPU CCD1 (Tdie)", SensorMetric.Temperature, 90), new("Distance to TjMax", SensorMetric.Temperature, 100), new("CPU Total", SensorMetric.Load, 12), new("CPU Core #1", SensorMetric.Load, 98)]),
+    new("igpu", "Integrated AMD", DeviceCategory.AmdGpu, [new("GPU Core", SensorMetric.Temperature, 94), new("GPU Hot Spot", SensorMetric.Temperature, 110), new("GPU Memory", SensorMetric.Temperature, 105), new("GPU Core", SensorMetric.Load, 88)]),
+    new("rtx", "NVIDIA RTX 4080", DeviceCategory.NvidiaGpu, [new("GPU Core", SensorMetric.Temperature, 43), new("GPU Hot Spot", SensorMetric.Temperature, 72), new("GPU Memory Junction", SensorMetric.Temperature, 82), new("GPU Core", SensorMetric.Load, 20), new("GPU Memory Controller", SensorMetric.Load, 99)]),
+    new("ram", "RAM", DeviceCategory.Memory, [new("Memory", SensorMetric.Load, 35), new("Virtual Memory", SensorMetric.Load, 90)])
+};
+var sensorProjected = SensorProjection.Project(sensorDevices, now);
+Check(sensorProjected.GpuDeviceId == "rtx" && sensorProjected.GpuDeviceName.Contains("4080"), "automatic GPU chooses NVIDIA, not hotter integrated graphics");
+Check(sensorProjected.GpuTemperature == 43 && sensorProjected.GpuLoad == 20, "GPU core temperature and load stay on the selected device");
+Check(sensorProjected.GpuHotSpotTemperature == 72 && sensorProjected.GpuMemoryTemperature == 82, "hotspot and VRAM are not borrowed from a different GPU");
+Check(sensorProjected.CpuTemperature == 60 && sensorProjected.CpuTemperatureSource == "Core (Tctl/Tdie)", "CPU package is named explicitly rather than hottest unnamed sensor");
+Check(sensorProjected.CpuMaximumTemperature == 90 && sensorProjected.CpuMaximumTemperatureSource == "CPU CCD1 (Tdie)", "actual CPU maximum retained separately; thermal distance is not a temperature");
+Check(FanSafety.IsCritical(sensorProjected, now), "genuinely hot CPU CCD still triggers critical protection");
+Check(!FanSafety.IsCritical(sensorProjected with { CpuMaximumTemperature = 60 }, now), "hot integrated GPU does not masquerade as selected GPU temperature");
+Check(sensorProjected.CpuLoad == 12 && sensorProjected.MemoryUsedPercent == 35 && sensorProjected.MemoryLoadSource == "Memory", "total CPU and physical RAM loads, not busiest core or virtual memory");
+Check(sensorProjected.GpuDevices.Count == 2 && sensorProjected.GpuDevices[0].Id == "rtx", "available GPU list is stable and selectable");
+var sensorPinned = SensorProjection.Project(sensorDevices, now, "igpu");
+Check(sensorPinned.GpuTemperature == 94 && sensorPinned.GpuLoad == 88 && sensorPinned.GpuHotSpotTemperature == 110, "explicit GPU selection controls every GPU metric");
+var sensorMissing = SensorProjection.Project(sensorDevices, now, "disconnected");
+Check(sensorMissing.GpuTemperature is null && sensorMissing.GpuLoad is null && sensorMissing.GpuDeviceId == "disconnected" && sensorMissing.Warning.Contains("no other GPU"), "missing pinned GPU does not silently fall back");
+var noNvidiaCore = sensorDevices.Select(d => d.Id == "rtx" ? d with { Sensors = d.Sensors.Where(s => s.Metric != SensorMetric.Temperature || !s.Name.Contains("Core")).ToArray() } : d).ToArray();
+var sensorNoCore = SensorProjection.Project(noNvidiaCore, now);
+Check(sensorNoCore.GpuTemperature is null && sensorNoCore.GpuHotSpotTemperature == 72 && sensorNoCore.GpuMemoryTemperature == 82 && sensorNoCore.GpuDeviceId == "rtx", "missing core is unavailable, not hotspot or integrated GPU fallback");
+Check(!FanSafety.IsCritical(sensorNoCore with { CpuMaximumTemperature = 60 }, now), "GPU hotspot is not mistaken for the core critical threshold");
+var sensorInvalid = SensorProjection.Project([new("cpu", "CPU", DeviceCategory.Cpu, [new("CPU Package", SensorMetric.Temperature, 0), new("CPU Total", SensorMetric.Load, 101)]), new("gpu", "GPU", DeviceCategory.NvidiaGpu, [new("GPU Core", SensorMetric.Temperature, double.NaN), new("GPU Core", SensorMetric.Load, -1)])], now);
+Check(sensorInvalid.CpuTemperature is null && sensorInvalid.GpuTemperature is null && sensorInvalid.CpuLoad is null && sensorInvalid.GpuLoad is null, "sentinel temperatures and out-of-range loads are unavailable");
+Check(sensorInvalid.Warning.Contains("never forced to 100%"), "missing-sensor explanation matches quiet release policy");
+Check(SensorProjection.Project(sensorDevices.Where(d => d.Category != DeviceCategory.NvidiaGpu).ToArray(), now).GpuDeviceId == "igpu", "automatic can use AMD when no NVIDIA device exists");
+Check(WidgetLayout.NumericValue(new LcdWidget { Source = WidgetSource.CpuMaximumTemperature }, sensorProjected) == 90, "maximum CPU sensor can be selected as an LCD widget");
+Check(!FanSafety.IsCritical(Tele() with { CpuMaximumTemperature = 150 }, now), "implausible maximum CPU sentinel cannot synthesize critical duty");
+settings = new(); settings.PreferredGpuId = "rtx"; Check(settings.Copy().PreferredGpuId == "rtx", "preferred GPU survives profile copy");
+settings.PreferredGpuId = "bad\nidentifier"; Throws(settings.Validate, "GPU identifier rejects control characters");
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");

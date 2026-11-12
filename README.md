@@ -70,6 +70,8 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 ## Features
 
 - CPU/GPU temperature and load, memory usage, and app CPU/RAM/thread/handle counters.
+- **Sensors** selects one GPU for all GPU metrics; automatic prefers NVIDIA, then AMD, then Intel. You can pin its identifier. A missing pinned GPU stays unavailable instead of silently substituting integrated graphics. The page shows the exact sampled device and temperature source.
+- CPU display prefers package/Tctl-Tdie. Its highest actual temperature sensor is retained separately for critical-heat protection and as an optional `CpuMaximumTemperature` LCD widget. Thermal distance/TjMax limits are not treated as measured temperatures. RAM usage is physical memory, not virtual-memory load.
 - Two independent LCDs: telemetry dashboard, image/GIF, or primary-screen mirroring; rotation, brightness, overlays, 1–10 FPS.
 - Native per-LCD widget editor: drag/resize, numeric bounds, font picker, size, bold, custom text, colors, alignment and sensor bindings. Editable radial gauges include range, thickness, track color and arc angles.
 - Image/GIF fitting preserves aspect ratio. GIF frames are sampled at the configured refresh rate; no video decoder runs in the background.
@@ -77,6 +79,7 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 - The cooling table separates **request → final target %**, **controller-reported %** and **RPM**. A lower target takes effect automatically; the command decreases smoothly rather than restarting the fans. Percentages are not electrical watts. Feedback is cleared after Stop/fault so old RPM cannot look live.
 - Per-port Static, Breathing, Blink, ColorCycle, RainbowWave, PaletteWave and Temperature RGB effects. PaletteWave blends 2–8 comma-separated hex colors around the LED ring (for example `FF0000, AA00FF`). Wave direction, color, brightness, LED count and period are editable. Existing profiles keep their original effects. Animations are capped at 5 FPS; thermal decisions run first.
 - The port editor shows a live preview of its planned RGB frame. It is not a claim of physical LED feedback; close the editor to accept and automatically apply the change.
+- Hidden LCD previews do not render while you are editing cooling or viewing another tab. Physical LCD output has its own loop and is unaffected by the selected tab.
 - Editor-only fields (color/effect/palette/name) also trigger automatic application, even when the visible grid values did not change. No repeated Stop/Apply is needed. Wiring/device enablement still requires explicit Stop/rearming.
 - JSON profiles, bounded in-memory log, diagnostics export, tray operation and opt-in preview or elevated saved-live sign-in startup.
 - Latest-snapshot telemetry and separate device loops: a stalled display does not block fan control. No thread per sensor, fan, or LED.
@@ -89,7 +92,7 @@ Managed channels:
 
 - Wait briefly for initial sensor data, then use the validated curve. Missing/invalid initial data aborts before taking control; it does not command full speed.
 - Missing/invalid CPU temperature, stale data over 5 seconds, or a missing selected curve sensor → release software control and request the captured original duty back. Restore the proven vendor controller; a static restored duty is not a dynamic firmware curve.
-- CPU or GPU at/above 85 °C → request 100% without ramp delay.
+- CPU package/maximum actual sensor or selected GPU core at/above 85 °C → request 100% without ramp delay. GPU hotspot/VRAM and thermal-distance limits are not silently treated as GPU core temperature.
 - Fan minimum at least 30%; configured pump minimum at least 60%. These are conservative software limits, not manufacturer-certified safe speeds.
 - Cooling increases are immediate. Decreases are limited to 3 percentage points/second and use 2 °C downward hysteresis.
 - Repeated zero-RPM readings or a detected controller error → request the captured original duty if USB still works, close and latch the fault. No forced 100% fallback or automatic reconnect loop. Resolve the cause and restore vendor control before retrying.

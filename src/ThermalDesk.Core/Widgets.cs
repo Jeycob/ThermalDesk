@@ -2,7 +2,7 @@ using System.Globalization;
 
 namespace ThermalDesk.Core;
 
-public enum WidgetSource { Text, CpuTemperature, GpuTemperature, GpuHotSpotTemperature, GpuMemoryTemperature, CpuLoad, GpuLoad, MemoryUsedPercent, Clock, Date, FanRpm, FanDuty }
+public enum WidgetSource { Text, CpuTemperature, GpuTemperature, GpuHotSpotTemperature, GpuMemoryTemperature, CpuLoad, GpuLoad, MemoryUsedPercent, Clock, Date, FanRpm, FanDuty, CpuMaximumTemperature }
 public enum WidgetAlignment { Left, Center, Right }
 public enum WidgetKind { Text, RadialGauge }
 
@@ -96,6 +96,7 @@ public static class WidgetLayout
     public static double? NumericValue(LcdWidget w, Telemetry t) => w.Source switch
         {
             WidgetSource.CpuTemperature => t.CpuTemperature, WidgetSource.GpuTemperature => t.GpuTemperature,
+            WidgetSource.CpuMaximumTemperature => t.CpuMaximumTemperature,
             WidgetSource.GpuHotSpotTemperature => t.GpuHotSpotTemperature, WidgetSource.GpuMemoryTemperature => t.GpuMemoryTemperature,
             WidgetSource.CpuLoad => t.CpuLoad, WidgetSource.GpuLoad => t.GpuLoad, WidgetSource.MemoryUsedPercent => t.MemoryUsedPercent,
             WidgetSource.FanRpm => t.Fans.FirstOrDefault(f => f.Port == w.Port)?.Rpm,

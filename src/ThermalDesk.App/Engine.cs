@@ -117,7 +117,7 @@ internal sealed class Engine
                         if (conflictingController) { stop?.Cancel(); Note("Conflicting controller detected; cancelling live control."); }
                         Telemetry reading;
                         if (testTelemetry is not null) reading = testTelemetry();
-                        else { monitor ??= new(); reading = monitor.Read(); }
+                        else { monitor ??= new(); reading = monitor.Read(Volatile.Read(ref current).PreferredGpuId); }
                         Volatile.Write(ref latest, reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray() });
                     }
                     else

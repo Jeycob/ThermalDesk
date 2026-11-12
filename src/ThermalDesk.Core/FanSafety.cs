@@ -48,7 +48,7 @@ public sealed class FanSafety
     {
         bool ValidHot(double? value) => value.HasValue && double.IsFinite(value.Value) && value.Value is >= 85 and <= 115;
         return now - t.Time <= TimeSpan.FromSeconds(5) && t.Time - now <= TimeSpan.FromSeconds(1) &&
-            (ValidHot(t.CpuTemperature) || ValidHot(t.GpuTemperature));
+            (ValidHot(t.CpuTemperature) || ValidHot(t.CpuMaximumTemperature) || ValidHot(t.GpuTemperature));
     }
     public void Reset() { previous = heldTemperature = null; }
     public static double Interpolate(IReadOnlyList<CurvePoint> points, double value)

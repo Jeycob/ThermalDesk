@@ -37,8 +37,8 @@ internal static class HardwareChecks
                     throw new ArgumentException("This check requires an explicitly configured five-fan profile. Pumps and unknown wiring are excluded.");
                 using (var monitor = new Monitoring())
                 {
-                    var t = monitor.Read();
-                    if (t.CpuTemperature is not (>= 5 and < 80) || t.GpuTemperature is not (>= 5 and < 80)) throw new InvalidOperationException("Valid core temperatures under 80 C required before starting.");
+                    var t = monitor.Read(profile.PreferredGpuId);
+                    if (t.CpuTemperature is not (>= 5 and < 80) || t.GpuTemperature is not (>= 5 and < 80) || t.CpuMaximumTemperature is >= 80) throw new InvalidOperationException("Valid selected-device temperatures under 80 C required before starting.");
                 }
                 var engine = new Engine(); int applies = 0; var samples = new List<object>();
                 report["fanSpeedWrites"] = true;
@@ -50,8 +50,8 @@ internal static class HardwareChecks
                         Thread.Sleep(1000);
                         if (engine.ControllerFault || engine.Cancelled) throw new IOException("Controller fault or conflict; test stopped without reconnecting.");
                         var t = engine.Latest;
-                        if (second > 8 && (t.CpuTemperature is not (>= 5 and < 85) || t.GpuTemperature is not (>= 5 and < 85)))
-                            throw new IOException("Core temperatures became unavailable/critical; test stopped with safe duty.");
+                        if (second > 8 && (t.CpuTemperature is not (>= 5 and < 85) || t.GpuTemperature is not (>= 5 and < 85) || FanSafety.IsCritical(t, DateTimeOffset.UtcNow)))
+                            throw new IOException("Temperatures unavailable/critical; stopping and requesting captured duties, except a real critical-heat override.");
                         if (second % 5 == 0) samples.Add(new { second, t.CpuTemperature, t.GpuTemperature, fans = engine.Fans.Values.OrderBy(x => x.Port).ToArray(), status = engine.Status.ToDictionary() });
                         // Exercise in-place UI-equivalent changes, not session restarts.
                         if (second == 30)
@@ -80,7 +80,7 @@ internal static class HardwareChecks
                 Telemetry Guard()
                 {
                     var t = monitor.Read();
-                    if (t.CpuTemperature is not (>= 5 and < 85) || t.GpuTemperature is not (>= 5 and < 85))
+                    if (t.CpuTemperature is not (>= 5 and < 85) || t.GpuTemperature is not (>= 5 and < 85) || FanSafety.IsCritical(t, DateTimeOffset.UtcNow))
                         throw new InvalidOperationException("CPU/GPU core must be valid and below 85 C.");
                     return t;
                 }
