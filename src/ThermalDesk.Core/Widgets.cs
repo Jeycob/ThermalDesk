@@ -120,13 +120,13 @@ public static class WidgetLayout
                 W("Clock", WidgetSource.Clock, "{value}", 12, height - 32, width - 24, 26, 18, "26DAB3", "HH:mm:ss")];
         if (width < 240)
             return [W("Title", WidgetSource.Text, "THERMALDESK", 4, 35, width - 8, 30, 13, "26DAB3"),
-                W("CPU", WidgetSource.CpuTemperature, "CPU {value}°", 4, 100, width - 8, 60, 24),
-                W("GPU", WidgetSource.GpuTemperature, "GPU {value}°", 4, 185, width - 8, 60, 24),
+                W("CPU", WidgetSource.CpuTemperature, "CPU {value} °C", 4, 100, width - 8, 60, 18),
+                W("GPU", WidgetSource.GpuTemperature, "GPU {value} °C", 4, 185, width - 8, 60, 18),
                 W("RAM", WidgetSource.MemoryUsedPercent, "RAM {value}%", 4, 270, width - 8, 50, 20),
                 W("Clock", WidgetSource.Clock, "{value}", 4, height - 100, width - 8, 36, 18, "26DAB3", "HH:mm:ss")];
         return [W("Title", WidgetSource.Text, "THERMALDESK", 64, 58, 352, 38, 26, "26DAB3"),
             W("CPU label", WidgetSource.Text, "CPU TEMPERATURE", 80, 110, 320, 32, 20, "97ACBF"),
-            W("CPU value", WidgetSource.CpuTemperature, "{value}°", 60, 150, 360, 105, 88),
+            W("CPU value", WidgetSource.CpuTemperature, "{value} °C", 60, 150, 360, 105, 76),
             W("GPU", WidgetSource.GpuTemperature, "GPU {value} °C", 75, 275, 330, 45, 30, "97ACBF"),
             W("RAM", WidgetSource.MemoryUsedPercent, "MEMORY {value}%", 90, 327, 300, 32, 22, "97ACBF"),
             W("Clock", WidgetSource.Clock, "{value}", 100, 371, 280, 40, 26, "26DAB3", "HH:mm:ss"),

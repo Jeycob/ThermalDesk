@@ -14,6 +14,8 @@ internal sealed class WidgetDesignerForm : Form
     private readonly PropertyGrid properties = new() { Dock = DockStyle.Fill, HelpVisible = true, ToolbarVisible = false };
     private readonly Label status = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
     private readonly DesignerCanvas canvas;
+    private readonly WidgetHistory history;
+    private readonly Button undo, redo;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     private bool rebinding;
     public DisplaySettings Result => working.Copy();
@@ -24,12 +26,15 @@ internal sealed class WidgetDesignerForm : Form
         (canvasWidth, canvasHeight) = WidgetLayout.Canvas(working, width, height);
         if (!working.UseCustomLayout && working.Widgets.Count == 0) working.Widgets = WidgetLayout.Defaults(canvasWidth, canvasHeight);
         working.UseCustomLayout = true; valid = working.Copy();
+        history = new(working, width, height, working.Widgets.FirstOrDefault()?.Id);
         Text = title + " · Widget designer"; Font = new Font("Segoe UI", 10); BackColor = Color.FromArgb(16, 25, 38); ForeColor = Color.White;
         ClientSize = new Size(1120, 740); MinimumSize = new Size(1000, 680); StartPosition = FormStartPosition.CenterParent;
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(12) };
-        root.RowStyles.Add(new(SizeType.Absolute, 42)); root.RowStyles.Add(new(SizeType.Absolute, 42)); root.RowStyles.Add(new(SizeType.Percent, 100)); root.RowStyles.Add(new(SizeType.Absolute, 52)); Controls.Add(root);
+        root.RowStyles.Add(new(SizeType.Absolute, 42)); root.RowStyles.Add(new(SizeType.Absolute, 78)); root.RowStyles.Add(new(SizeType.Percent, 100)); root.RowStyles.Add(new(SizeType.Absolute, 52)); Controls.Add(root);
         root.Controls.Add(new Label { Dock = DockStyle.Fill, Text = $"{canvasWidth} × {canvasHeight} design pixels · drag to move · bottom-right handle to resize · arrow keys = 1 px (Shift = 10 px)\nDesign before rotation. The circle guide marks the round LCD crop. Editing never writes to USB.", ForeColor = Color.FromArgb(151, 172, 191) }, 0, 0);
-        var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
+        undo = MakeButton("Undo", () => RestoreHistory(false)); redo = MakeButton("Redo", () => RestoreHistory(true));
+        tools.Controls.Add(undo); tools.Controls.Add(redo);
         tools.Controls.Add(MakeButton("Add", Add)); tools.Controls.Add(MakeButton("Duplicate", Duplicate)); tools.Controls.Add(MakeButton("Delete", Delete));
         tools.Controls.Add(MakeButton("Back", () => Reorder(-1))); tools.Controls.Add(MakeButton("Front", () => Reorder(1)));
         tools.Controls.Add(MakeButton("Font…", PickFont)); tools.Controls.Add(MakeButton("Canvas color…", PickBackground)); tools.Controls.Add(MakeButton("Defaults", Defaults)); tools.Controls.Add(MakeButton("Export PNG…", Export)); root.Controls.Add(tools, 0, 1);
@@ -67,8 +72,24 @@ internal sealed class WidgetDesignerForm : Form
     private bool Commit()
     {
         string? selectedId = Selected?.Id;
-        try { WidgetLayout.Validate(working, physicalWidth, physicalHeight); valid = working.Copy(); status.ForeColor = Color.FromArgb(38, 218, 179); status.Text = $"{working.Widgets.Count}/40 widgets · Preview until Apply layout · then saved/applied automatically."; Rebind(selectedId); return true; }
+        try { WidgetLayout.Validate(working, physicalWidth, physicalHeight); history.Record(working, selectedId); valid = working.Copy(); status.ForeColor = Color.FromArgb(38, 218, 179); status.Text = $"{working.Widgets.Count}/40 widgets · Preview until Apply layout · then saved/applied automatically."; Rebind(selectedId); UpdateHistoryButtons(); return true; }
         catch (ArgumentException e) { working = valid.Copy(); Rebind(selectedId); status.ForeColor = Color.Orange; status.Text = e.Message; return false; }
+    }
+    private void UpdateHistoryButtons() { undo.Enabled = history.CanUndo; redo.Enabled = history.CanRedo; }
+    private void RestoreHistory(bool forward)
+    {
+        var state = forward ? history.Redo() : history.Undo();
+        if (state is null) return;
+        working = state.Layout; valid = working.Copy(); Rebind(state.SelectedId); UpdateHistoryButtons();
+        status.ForeColor = Color.FromArgb(38, 218, 179);
+        status.Text = (forward ? "Redone" : "Undone") + " · Preview only until Apply layout · Ctrl+Z / Ctrl+Y";
+    }
+    protected override bool ProcessCmdKey(ref Message message, Keys keys)
+    {
+        // Keep the PropertyGrid text editor's native text undo while it has focus.
+        if (!properties.ContainsFocus && keys is (Keys.Control | Keys.Z) or (Keys.Control | Keys.Y))
+        { RestoreHistory(keys == (Keys.Control | Keys.Y)); return true; }
+        return base.ProcessCmdKey(ref message, keys);
     }
     private void Add()
     {
@@ -132,6 +153,19 @@ internal sealed class WidgetDesignerForm : Form
         string id = Selected!.Id; Reorder(-1); Verify(working.Widgets.IndexOf(Selected!) == working.Widgets.Count - 2 && Selected!.Id == id, "change z order");
         new WidgetProperties(Selected!).Width = canvasWidth + 1; Verify(!Commit(), "invalid property rejected"); Verify(Selected!.X + Selected.Width <= canvasWidth, "invalid edit rolls back");
         Delete(); Delete(); Verify(working.Widgets.Count == initial, "delete widgets");
+        undo.PerformClick(); Verify(working.Widgets.Count == initial + 1 && redo.Enabled, "Undo restores deleted widget");
+        redo.PerformClick(); Verify(working.Widgets.Count == initial && !redo.Enabled, "Redo repeats deletion");
+        undo.PerformClick(); Add(); Verify(working.Widgets.Count == initial + 2 && !redo.Enabled, "New edit after Undo discards redo branch");
+        string selectedId = Selected!.Id; int beforeMove = Selected.X;
+        canvas.NudgeForTest(); undo.PerformClick(); Verify(Selected!.Id == selectedId && Selected.X == beforeMove, "Undo restores keyboard geometry and selection");
+        redo.PerformClick(); Verify(Selected!.X == beforeMove + 1, "Redo reapplies keyboard geometry");
+        new WidgetProperties(Selected!).Width = canvasWidth + 1; Verify(!Commit(), "Invalid edit remains rejected after undo/redo");
+        undo.PerformClick(); Verify(Selected!.X == beforeMove, "Invalid edit did not consume valid history");
+        canvas.LoseCaptureForTest();
+        Verify(Selected!.X > beforeMove && history.CanUndo && !history.CanRedo, "Interrupted mouse drag commits a new valid state");
+        int afterDrag = Selected!.X; canvas.MoveWithoutDraggingForTest();
+        Verify(Selected!.X == afterDrag, "Lost mouse capture cannot leave widget stuck to the pointer");
+        undo.PerformClick(); Verify(Selected!.X == beforeMove, "Undo restores interrupted drag");
         return assertions;
     }
     protected override void Dispose(bool disposing) { if (disposing) timer.Dispose(); base.Dispose(disposing); }
@@ -188,6 +222,12 @@ internal sealed class DesignerCanvas : Control
         RefreshFrame();
     }
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); if (!moving && !resizing) return; moving = resizing = false; Capture = false; GeometryChanged?.Invoke(); }
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (Capture || (!moving && !resizing)) return;
+        moving = resizing = false; GeometryChanged?.Invoke();
+    }
     protected override bool IsInputKey(Keys keyData) => (keyData & Keys.KeyCode) is Keys.Up or Keys.Down or Keys.Left or Keys.Right || base.IsInputKey(keyData);
     protected override void OnKeyDown(KeyEventArgs e)
     {
@@ -202,6 +242,16 @@ internal sealed class DesignerCanvas : Control
         var box = View(w); int x = (int)box.Right, y = (int)box.Bottom;
         OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0)); OnMouseMove(new MouseEventArgs(MouseButtons.Left, 0, x + 12, y + 8, 0)); OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x + 12, y + 8, 0));
     }
+    internal void LoseCaptureForTest()
+    {
+        if (selection() is not { } w) throw new InvalidOperationException("Select a widget first.");
+        var box = View(w); int x = (int)(box.Left + box.Width / 2), y = (int)(box.Top + box.Height / 2);
+        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0));
+        OnMouseMove(new MouseEventArgs(MouseButtons.Left, 0, x + 5, y, 0));
+        OnMouseMove(new MouseEventArgs(MouseButtons.Left, 0, x + 10, y, 0));
+        Capture = false; OnMouseCaptureChanged(EventArgs.Empty);
+    }
+    internal void MoveWithoutDraggingForTest() => OnMouseMove(new MouseEventArgs(MouseButtons.None, 0, 100, 100, 0));
     protected override void Dispose(bool disposing) { if (disposing) { frame?.Dispose(); renderer.Dispose(); } base.Dispose(disposing); }
 }
 

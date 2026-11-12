@@ -251,3 +251,21 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   objects at 65 before/after. Remote verification is recorded with the release
   artifacts. No physical fan, RGB, LCD or sensor tests; the
   operator's running Silent session and startup registration remain untouched.
+
+0.3.9 SOFTWARE-ONLY FOLLOW-UP
+- Both LCD editors now provide bounded Undo/Redo with toolbar buttons and
+  Ctrl+Z/Ctrl+Y. The PropertyGrid retains native text undo while it has focus.
+- History snapshots are deep copies, limited to 50 states; no-op/invalid edits
+  consume no entry. New edits discard only the abandoned redo branch. Selection,
+  geometry, content, typography, colors, ordering and canvas color are restored.
+- Lost mouse capture commits one completed drag and clears drag state, preventing
+  widgets from following later pointer movement after switching windows.
+- UI/mock tests exercise deletion, branching, keyboard geometry, rejected edits,
+  mouse capture loss and Undo on both LCD editors. No hardware session is opened.
+- Every default temperature widget now explicitly labels Celsius, including
+  rotated narrow layouts. Existing user-created templates remain unchanged.
+- Local core checks: 953 assertions; native UI/mock checks: 147; 200 repeated
+  renders retained GDI65/65. Remote checks are recorded with staged artifacts.
+- Initial capture-loss fixture incorrectly expected history count to increase
+  after replacing a redo branch. Fixed the fixture to verify actual geometry,
+  single-step Undo and discarded redo state. No production failure was hidden.

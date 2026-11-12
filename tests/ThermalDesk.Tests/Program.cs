@@ -99,9 +99,9 @@ foreach (int rotation in new[] { 0, 90, 180, 270 })
 }
 var widgets = new DisplaySettings { UseCustomLayout = true, Widgets = WidgetLayout.Defaults(480, 480) };
 var widget = widgets.Widgets[2]; widget.ValueFormat = "0.0";
-Check(WidgetLayout.Format(widget, Tele(52.25)) == "52.3°", "numeric widget format uses invariant culture");
-Check(WidgetLayout.Format(widget, Tele(null)) == "—°", "missing sensor placeholder");
-Check(WidgetLayout.Format(widget, Tele(double.NaN)) == "—°", "NaN never displayed as a reading");
+Check(WidgetLayout.Format(widget, Tele(52.25)) == "52.3 °C", "numeric widget format uses invariant culture");
+Check(WidgetLayout.Format(widget, Tele(null)) == "— °C", "missing sensor placeholder");
+Check(WidgetLayout.Format(widget, Tele(double.NaN)) == "— °C", "NaN never displayed as a reading");
 widget.Source = WidgetSource.FanRpm; widget.Port = 2; widget.TextTemplate = "Fan {value}"; widget.ValueFormat = "0";
 Check(WidgetLayout.Format(widget, Tele() with { Fans = [new(2, 1234, 60)] }) == "Fan 1234", "fan port source binding");
 Check(WidgetLayout.Format(widget, Tele()) == "Fan —", "missing fan placeholder");
@@ -292,4 +292,34 @@ finally
     foreach (string file in Directory.GetFiles(recoveryFolder)) File.Delete(file);
     Directory.Delete(recoveryFolder);
 }
+foreach (var shape in new[] { (Width: 480, Height: 480), (Width: 480, Height: 128) })
+{
+    var editable = new DisplaySettings { UseCustomLayout = true, Widgets = WidgetLayout.Defaults(shape.Width, shape.Height) };
+    string selection = editable.Widgets[0].Id; string originalText = editable.Widgets[0].TextTemplate;
+    var editHistory = new WidgetHistory(editable, shape.Width, shape.Height, selection);
+    Check(!editHistory.CanUndo && !editHistory.CanRedo && editHistory.Count == 1, "history starts with isolated initial layout");
+    Check(editHistory.Undo() is null && editHistory.Redo() is null, "history boundaries do not invent states");
+    editable.Widgets[0].TextTemplate = "Edited {value}"; editHistory.Record(editable, selection);
+    editable.Widgets[0].TextTemplate = "Unrecorded mutation";
+    var undoneEdit = editHistory.Undo()!;
+    Check(undoneEdit.Layout.Widgets[0].TextTemplate == originalText && undoneEdit.SelectedId == selection, "Undo restores original content and selection");
+    undoneEdit.Layout.Widgets[0].TextTemplate = "Returned mutation";
+    var redoneEdit = editHistory.Redo()!;
+    Check(redoneEdit.Layout.Widgets[0].TextTemplate == "Edited {value}", "Recorded state does not alias caller-owned input");
+    Check(!editHistory.Record(redoneEdit.Layout, selection) && editHistory.Count == 2, "unchanged commit does not consume history");
+    Check(editHistory.Undo()!.Layout.Widgets[0].TextTemplate == originalText, "returned state cannot mutate older snapshots");
+    var branch = editable.Copy(); branch.Widgets[0].TextTemplate = "New branch"; editHistory.Record(branch, selection);
+    Check(!editHistory.CanRedo && editHistory.Redo() is null, "new edit invalidates abandoned redo branch");
+    var brokenEdit = branch.Copy(); brokenEdit.Widgets[0].Width = shape.Width + 1;
+    bool invalidRejected = false; try { editHistory.Record(brokenEdit, selection); } catch (ArgumentException) { invalidRejected = true; }
+    Check(invalidRejected && editHistory.Count == 2, "invalid edit cannot replace valid undo history");
+    for (int i = 0; i < WidgetHistory.MaximumStates + 10; i++) { branch.Widgets[0].TextTemplate = "Version " + i; editHistory.Record(branch, selection); }
+    Check(editHistory.Count == WidgetHistory.MaximumStates, "edit history is memory bounded");
+    int undoCount = 0; while (editHistory.Undo() is not null) undoCount++;
+    Check(undoCount == WidgetHistory.MaximumStates - 1 && !editHistory.CanUndo, "bounded history evicts only oldest states");
+    while (editHistory.Redo() is not null) { }
+    Check(!editHistory.CanRedo && editHistory.Undo() is not null, "history stays usable after traversing all retained states");
+}
+foreach (var shape in new[] { (480, 480), (480, 128), (128, 480) })
+    Check(WidgetLayout.Defaults(shape.Item1, shape.Item2).Where(w => w.Source is WidgetSource.CpuTemperature or WidgetSource.GpuTemperature).All(w => w.TextTemplate.Contains("°C")), "every default temperature widget explicitly identifies Celsius in every orientation");
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");
