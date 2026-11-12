@@ -11,7 +11,7 @@ namespace ThermalDesk.App;
 internal sealed class MainForm : Form
 {
     private static readonly Color Background = Color.FromArgb(10, 17, 29), Surface = Color.FromArgb(22, 34, 48), Accent = Color.FromArgb(38, 218, 179), Muted = Color.FromArgb(151, 172, 191);
-    private readonly Engine engine = new();
+    private readonly Engine engine;
     private readonly string configPath;
     private Settings settings;
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
@@ -40,9 +40,9 @@ internal sealed class MainForm : Form
     public bool StartMinimized { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool StartupRequested { get; set; }
-    public MainForm(Settings initial, string path)
+    public MainForm(Settings initial, string path, Engine? testEngine = null)
     {
-        settings = initial; configPath = path;
+        engine = testEngine ?? new(); settings = initial; configPath = path;
         foreach (var port in initial.Ports) portDesign[port.Port] = port.Copy();
         Text = "ThermalDesk · local hardware control"; BackColor = Background; ForeColor = Color.White;
         Font = new Font("Segoe UI", 10); ClientSize = new Size(1180, 820); MinimumSize = new Size(1000, 720);
@@ -108,7 +108,8 @@ internal sealed class MainForm : Form
         cooling.Checked = initial.CoolingEnabled; wiring.Checked = initial.CoolingWiringConfirmed; rgb.Checked = initial.RgbEnabled; monitorFans.Checked = initial.MonitorFanController; color.Text = initial.RgbColor; serial.Text = initial.ControllerSerial;
         TrackSettingsChanges(cooling); TrackSettingsChanges(wiring); TrackSettingsChanges(rgb); TrackSettingsChanges(monitorFans);
         TrackSettingsChanges(color); TrackSettingsChanges(serial); TrackSettingsChanges(poll); TrackSettingsChanges(panelEditor); TrackSettingsChanges(aioEditor);
-        ports.CellValueChanged += (_, _) => QueueSettingsApply();
+        // Feedback columns must never trigger saving/reapplying settings every poll.
+        ports.CellValueChanged += (_, e) => { if (e.RowIndex >= 0 && e.ColumnIndex is >= 1 and <= 8) QueueSettingsApply(); };
         panelEditor.SettingsChanged += QueueSettingsApply; aioEditor.SettingsChanged += QueueSettingsApply;
         settingsDelay.Tick += (_, _) => ApplyPendingSettings();
         tray.ContextMenuStrip = new ContextMenuStrip(); tray.ContextMenuStrip.Items.Add("Open", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
@@ -153,17 +154,21 @@ internal sealed class MainForm : Form
         };
         ports.Dock = DockStyle.Fill; ports.AllowUserToAddRows = ports.AllowUserToDeleteRows = false; ports.RowHeadersVisible = false; ports.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         ports.BackgroundColor = Surface; ports.BorderStyle = BorderStyle.None; ports.DefaultCellStyle.BackColor = Surface; ports.DefaultCellStyle.ForeColor = Color.White;
+        ports.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
         ports.DefaultCellStyle.SelectionBackColor = Color.FromArgb(36, 81, 93); ports.EnableHeadersVisualStyles = false;
         ports.ColumnHeadersDefaultCellStyle.BackColor = Background; ports.ColumnHeadersDefaultCellStyle.ForeColor = Muted; ports.RowTemplate.Height = 34;
-        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Port", ReadOnly = true, FillWeight = 35 });
+        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Port", ReadOnly = true, FillWeight = 85 });
         foreach (var pair in new[] { ("Role", Enum.GetNames<PortRole>()), ("Mode", Enum.GetNames<ControlMode>()), ("Source", Enum.GetNames<TemperatureSource>()) })
-            ports.Columns.Add(new DataGridViewComboBoxColumn { Name = pair.Item1, DataSource = pair.Item2, FlatStyle = FlatStyle.Flat, FillWeight = 75 });
+            ports.Columns.Add(new DataGridViewComboBoxColumn { Name = pair.Item1, DataSource = pair.Item2, FlatStyle = FlatStyle.Flat, FillWeight = pair.Item1 == "Source" ? 100 : 75 });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Minimum", HeaderText = "Min %", FillWeight = 42 });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Fixed", HeaderText = "Fixed %", FillWeight = 42 });
         ports.Columns.Add(new DataGridViewCheckBoxColumn { Name = "RGB", FillWeight = 36 });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "LEDs", FillWeight = 36 });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Curve", HeaderText = "Curve · °C:% separated by ;", FillWeight = 210 });
         ports.Columns.Add(new DataGridViewButtonColumn { Name = "Editor", HeaderText = "Curve / RGB", Text = "Edit…", UseColumnTextForButtonValue = true, FillWeight = 60 });
+        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Requested", HeaderText = "Request → target %", ReadOnly = true, FillWeight = 85, ToolTipText = "Current software command → final curve target. Reductions are smoothed; percentages are not RPM or watts." });
+        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Reported", HeaderText = "Reported %", ReadOnly = true, FillWeight = 55, ToolTipText = "Duty returned by the controller, not an independent measurement of electrical power." });
+        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "RPM", HeaderText = "RPM", ReadOnly = true, FillWeight = 50, ToolTipText = "Tachometer feedback in revolutions per minute; unavailable after Stop or a controller fault." });
         foreach (var p in settings.Ports) ports.Rows.Add(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount, string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));
         ports.DataError += (_, e) => { e.ThrowException = false; };
         ports.CellContentClick += (_, e) =>
@@ -173,11 +178,19 @@ internal sealed class MainForm : Form
             {
                 ports.EndEdit(); var row = ports.Rows[e.RowIndex]; using var editor = new PortEditorForm(ReadPort(row), () => engine.Latest, color.Text);
                 if (editor.ShowDialog(this) != DialogResult.OK) return;
-                var p = editor.Result; portDesign[p.Port] = p.Copy();
-                row.SetValues(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount, string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));
+                AcceptPortEditorResult(row, editor.Result);
             }
             catch (Exception error) { Error(error); }
         };
+    }
+    private void AcceptPortEditorResult(DataGridViewRow row, PortSettings value)
+    {
+        var p = value.Copy(); portDesign[p.Port] = p;
+        row.SetValues(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount,
+            string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));
+        // RGB effects, colors and names are not represented in editable grid cells.
+        // Accepting the dialog must enqueue an update even if every grid value is unchanged.
+        QueueSettingsApply();
     }
     private PortSettings ReadPort(DataGridViewRow row)
     {
@@ -272,6 +285,14 @@ internal sealed class MainForm : Form
         if (engine.ControllerFault) session.Text = "CONTROLLER FAULT · release requested · restore vendor control · see log";
         if (applyHint.Length > 0) session.Text += " · " + applyHint;
         deviceStatus.Text = string.Join(Environment.NewLine + Environment.NewLine, engine.Status.OrderBy(x => x.Key).Select(x => x.Key + "\r\n" + x.Value)) + "\r\n\r\n" + string.Join("\r\n", engine.Fans.Values.OrderBy(x => x.Port).Select(x => $"Port {x.Port}: {x.Rpm} RPM / reported {x.Duty}%"));
+        foreach (DataGridViewRow row in ports.Rows)
+        {
+            int port = Convert.ToInt32(row.Cells[0].Value);
+            string requested = engine.FanCommands.TryGetValue(port, out var command) ? $"{command.RequestedDuty} → {command.TargetDuty}" : "—";
+            bool hasReading = engine.Fans.TryGetValue(port, out var reading);
+            void Update(int column, string value) { if (!Equals(row.Cells[column].Value, value)) row.Cells[column].Value = value; }
+            Update(10, requested); Update(11, hasReading ? reading!.Duty.ToString(CultureInfo.InvariantCulture) : "—"); Update(12, hasReading ? reading!.Rpm.ToString(CultureInfo.InvariantCulture) : "—");
+        }
         log.Text = string.Join(Environment.NewLine, engine.Logs);
         try { var a = panelRenderer.Render(t, settings.Panel, 480, 128); var old = panelPreview.Image; panelPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · panel preview: " + e.Message; }
         try { var a = aioRenderer.Render(t, settings.Aio, 480, 480); var old = aioPreview.Image; aioPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · AIO preview: " + e.Message; }
@@ -289,7 +310,7 @@ internal sealed class MainForm : Form
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(AcceptanceStatusPath)!);
-            File.WriteAllText(AcceptanceStatusPath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.Running, engine.Live, engine.Cancelled, administrator = StartupManager.Elevated, telemetry = engine.Latest, fans = engine.Fans.Values.OrderBy(x => x.Port), status = engine.Status, log = engine.Logs.TakeLast(12) }, Settings.JsonOptions));
+            File.WriteAllText(AcceptanceStatusPath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.Running, engine.Live, engine.Cancelled, administrator = StartupManager.Elevated, telemetry = engine.Latest, fans = engine.Fans.Values.OrderBy(x => x.Port), fanCommands = engine.FanCommands.Values.OrderBy(x => x.Port), status = engine.Status, log = engine.Logs.TakeLast(12) }, Settings.JsonOptions));
         }
         catch (Exception error) { session.Text = "Acceptance status output failed: " + error.Message; }
     }
@@ -419,6 +440,41 @@ internal sealed class MainForm : Form
             return 3;
         }
         finally { smokeMode = true; settingsDelay.Stop(); }
+    }
+    internal int ExerciseLiveAutomaticSettingsForTest(string screenshot)
+    {
+        int checks = 0;
+        void Verify(bool condition, string message) { checks++; if (!condition) throw new InvalidOperationException("Live UI: " + message); }
+        void WaitFor(Func<bool> done)
+        {
+            var clock = Stopwatch.StartNew();
+            while (!done() && clock.ElapsedMilliseconds < 6000) { Application.DoEvents(); Thread.Sleep(10); }
+            Verify(done(), "automatic change timed out");
+        }
+        IEnumerable<Control> Descendants(Control parent) { foreach (Control child in parent.Controls) { yield return child; foreach (var nested in Descendants(child)) yield return nested; } }
+        ShowOffscreenForTest(); Descendants(this).OfType<TabControl>().Single().SelectedIndex = 1;
+        smokeMode = false;
+        try
+        {
+            Descendants(this).OfType<Button>().Single(b => b.Text == "Silent").PerformClick();
+            WaitFor(() => engine.FanCommands.Count == 5 && engine.FanCommands.Values.All(c => c.TargetDuty == 30));
+            Verify(SettingsStore.Load(configPath).Ports.All(p => FanPresets.Identify(p) == FanPreset.Silent), "all five Silent presets persisted without Save/Stop");
+            Verify(engine.Running && engine.Live && !engine.ControllerFault && !liveButton.Enabled, "same live session remains active");
+            var row = ports.Rows[0]; var extended = ReadPort(row);
+            extended.RgbEffect = RgbEffect.PaletteWave; extended.RgbPalette = ["112233", "AA00FF"]; extended.RgbDirection = RgbDirection.Reverse;
+            AcceptPortEditorResult(row, extended);
+            WaitFor(() => SettingsStore.Load(configPath).Ports[0].RgbEffect == RgbEffect.PaletteWave);
+            Verify(SettingsStore.Load(configPath).Ports[0].RgbDirection == RgbDirection.Reverse, "editor-only fields applied even with identical grid values");
+            RefreshData();
+            Verify(row.Cells[10].Value!.ToString()!.Contains("→ 30") && row.Cells[12].Value!.ToString() != "—", "requested target and RPM visible");
+            Verify(!settingsDelay.Enabled, "read-only feedback does not schedule another configuration apply");
+            Descendants(this).OfType<Button>().Single(b => b.Text == "Custom").PerformClick();
+            WaitFor(() => engine.FanCommands.Values.All(c => c.TargetDuty == 45));
+            Verify(SettingsStore.Load(configPath).Ports.All(p => p.Curve.All(point => point.Duty == 45)), "Custom restores every original curve");
+            RefreshData(); using var image = new Bitmap(Width, Height); DrawToBitmap(image, new Rectangle(Point.Empty, Size)); image.Save(screenshot, System.Drawing.Imaging.ImageFormat.Png);
+            return checks;
+        }
+        finally { smokeMode = true; settingsDelay.Stop(); Hide(); }
     }
     protected override void Dispose(bool disposing)
     { if (disposing) { settingsDelay.Dispose(); refresh.Dispose(); } base.Dispose(disposing); }

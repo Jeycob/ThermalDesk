@@ -39,15 +39,26 @@ internal static class WidgetChecks
             using (var form = new MainForm(restored, path)) form.RenderPreview(Path.Combine(directory, "main-widgets.png"));
             using (var form = new MainForm(new Settings(), Path.Combine(directory, "automatic-settings.json"))) count += form.ExerciseAutomaticSettingsForTest();
             using (var form = new PortEditorForm(new PortSettings { Port = 1 })) count += form.ExerciseForTest(Path.Combine(directory, "port-editor.png"));
+            var allFans = new Settings { CoolingEnabled = true, CoolingWiringConfirmed = true, PollSeconds = 10 };
+            foreach (var port in allFans.Ports) { port.Role = PortRole.Fan; port.Mode = ControlMode.Fixed; port.FixedDuty = 65; port.MinimumDuty = 30; port.Curve = [new(20, 45), new(100, 45)]; }
+            Check(Engine.SensorInterval(allFans) == 2, "Active cooling keeps telemetry fresh even when general polling is ten seconds");
+            Check(Engine.SensorInterval(new Settings { PollSeconds = 10 }) == 10, "Monitoring-only polling remains operator-configured");
+            int uiOpens = 0; var uiController = new TestController();
+            var uiEngine = new Engine(_ => { Interlocked.Increment(ref uiOpens); return uiController; }, () => t with { Time = DateTimeOffset.UtcNow, CpuTemperature = 50, GpuTemperature = 40 }, () => []);
+            uiEngine.Start(allFans, true);
+            try { using var form = new MainForm(allFans, Path.Combine(directory, "automatic-live-profile.json"), uiEngine); count += form.ExerciseLiveAutomaticSettingsForTest(Path.Combine(directory, "cooling-feedback.png")); Check(uiOpens == 1, "All-five-fan UI changes use exactly one mock controller connection"); }
+            finally { Task.Run(async () => await uiEngine.Stop()).GetAwaiter().GetResult(); }
+            Check(uiEngine.Fans.Count == 0 && uiEngine.FanCommands.Count == 0, "Stop clears stale fan feedback and command displays");
             var fake = new TestController();
             var rgbSettings = new Settings { RgbEnabled = true, MonitorFanController = true };
             rgbSettings.Ports[0].Rgb = true; rgbSettings.Ports[0].RgbEffect = RgbEffect.RainbowWave;
             var simulation = new Engine(_ => fake, () => t with { Time = DateTimeOffset.UtcNow }, () => []);
             simulation.Start(rgbSettings, true);
-            Thread.Sleep(2200); Task.Run(async () => await simulation.Stop()).GetAwaiter().GetResult();
+            Thread.Sleep(2200); Check(simulation.Fans.Count == 5, "Read-only controller monitoring must expose all five ports.");
+            Task.Run(async () => await simulation.Stop()).GetAwaiter().GetResult();
             Check(fake.DutyWrites == 0, "RGB-only session must never send fan duty writes.");
             Check(fake.LightingFrames is >= 3 and <= 14, "RGB cadence must remain bounded near five frames/second.");
-            Check(simulation.Fans.Count == 5, "Read-only controller monitoring must expose all five ports.");
+            Check(simulation.Fans.Count == 0, "Stopped controller monitoring must not display old RPM as current.");
             int opens = 0;
             var control = new TestController();
             var cooling = new Settings { CoolingEnabled = true, CoolingWiringConfirmed = true };

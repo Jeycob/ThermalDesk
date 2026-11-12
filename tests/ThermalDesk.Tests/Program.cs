@@ -29,7 +29,11 @@ Check(safety.Evaluate(port, Tele(null), now, 2).Duty is null, "fixed-mode CPU mi
 port.Role = PortRole.Fan; port.FixedDuty = 70; safety.Reset();
 Check(safety.Evaluate(port, Tele(), now, 2).Duty == 70, "fixed duty");
 port.FixedDuty = 40;
-Check(safety.Evaluate(port, Tele(), now, 2).Duty == 64, "slow downward ramp");
+var ramp = safety.Evaluate(port, Tele(), now, 2);
+Check(ramp.Duty == 64, "slow downward ramp");
+Check(ramp.TargetDuty == 40, "final requested target remains visible during the downward ramp");
+Check(new FanSafety().Evaluate(port, Tele(90), now, 2).TargetDuty == 100, "real critical response exposes the emergency target");
+Check(new FanSafety().Evaluate(port, Tele(null), now, 2).TargetDuty is null, "missing sensor does not invent a target");
 port.FixedDuty = 90;
 Check(safety.Evaluate(port, Tele(), now, 2).Duty == 90, "immediate upward response");
 port.Mode = ControlMode.Preserve; port.Role = PortRole.Unknown;

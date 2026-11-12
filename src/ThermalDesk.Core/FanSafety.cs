@@ -1,6 +1,11 @@
 namespace ThermalDesk.Core;
 
-public sealed record FanDecision(int? Duty, string Reason);
+public sealed record FanDecision(int? Duty, string Reason)
+{
+    // Unslewed curve/fixed target, separate from the command actually sent now.
+    public int? TargetDuty { get; init; }
+}
+public sealed record FanControlState(int Port, int RequestedDuty, int TargetDuty, string Reason, DateTimeOffset Time);
 public sealed class FanSafety
 {
     private double? previous;
@@ -31,12 +36,13 @@ public sealed class FanSafety
         }
         int floor = p.Role == PortRole.Pump ? Math.Max(60, p.MinimumDuty) : Math.Max(30, p.MinimumDuty);
         target = Math.Clamp(target, floor, 100);
+        int finalTarget = (int)Math.Ceiling(target);
         // Never slew-limit safety responses. Normal reductions are deliberately slow.
         if (previous.HasValue && target < previous) target = Math.Max(target, previous.Value - 3 * Math.Clamp(seconds, 0, 10));
         previous = target;
-        return new((int)Math.Ceiling(target), p.Mode == ControlMode.Fixed ? "Fixed" : $"Curve · {heldTemperature:0.0} °C");
+        return new((int)Math.Ceiling(target), p.Mode == ControlMode.Fixed ? "Fixed" : $"Curve · {heldTemperature:0.0} °C") { TargetDuty = finalTarget };
     }
-    private FanDecision Full(string reason) { previous = 100; heldTemperature = null; return new(100, reason); }
+    private FanDecision Full(string reason) { previous = 100; heldTemperature = null; return new(100, reason) { TargetDuty = 100 }; }
     private FanDecision Release(string reason) => new(null, reason + " · release software control; do not force full speed");
     public static bool IsCritical(Telemetry t, DateTimeOffset now)
     {

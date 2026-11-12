@@ -195,3 +195,20 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   timer, including recovery after an incomplete/invalid edit, without starting
   a hardware session. Fake-controller checks cover Full -> Silent and lighting
   updates without a second USB open. No live fan/RGB test or deployment launch.
+
+0.3.6 SOFTWARE-ONLY FOLLOW-UP
+- Fixed a real missed-apply path: accepting a port editor with only color/effect/
+  palette/name changes did not necessarily change a grid cell or queue an apply.
+  Dialog acceptance now explicitly schedules the same debounced update.
+- A no-USB main-window test clicks Silent/Custom on all five mock fans, verifies
+  persistence and target changes, accepts editor-only fields, and checks that
+  only one controller connection was opened. Read-only feedback cannot retrigger
+  configuration application on every refresh.
+- The table now distinguishes request -> unslewed target %, controller-reported
+  duty %, and tachometer RPM. Stop/fault clears old feedback/commands.
+- Active cooling limits sensor sampling to at most two seconds even if general
+  polling is ten seconds; this avoids stale-data faults at an accepted setting.
+  Downward smoothing uses actual control elapsed time, not the configured poll
+  interval. Sensor-only/display sessions retain their selected polling interval.
+- This release is staged only. The sleeping operator's running old candidate,
+  current Silent configuration, fans, RGB and LCDs are not changed or restarted.
