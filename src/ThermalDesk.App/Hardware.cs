@@ -64,6 +64,7 @@ internal interface ILcd : IDisposable
 internal sealed class PanelLcd : ILcd
 {
     private readonly HidLink command, frame;
+    private int disposed;
     public PanelLcd(int brightness)
     {
         var devices = DeviceList.Local.GetHidDevices(Protocols.Vendor, Protocols.PanelPid).ToArray();
@@ -91,13 +92,15 @@ internal sealed class PanelLcd : ILcd
         if (frame.Read(1025).Length < 2) throw new IOException("Missing frame acknowledgement.");
     }
     public void Heartbeat() => command.Write(Protocols.Command(0x82));
-    public void Dispose() { frame.Dispose(); command.Dispose(); }
+    internal static void DisposeInterfaces(IDisposable frames, IDisposable commands) { try { frames.Dispose(); } finally { commands.Dispose(); } }
+    public void Dispose() { if (Interlocked.Exchange(ref disposed, 1) == 0) DisposeInterfaces(frame, command); }
 }
 
 // AX detection and protocol adapted from DailyDana/OpenAIO Panel (MIT).
 internal sealed class AioLcd : ILcd
 {
     private readonly HidLink link;
+    private int disposed;
     public AioLcd(int brightness)
     {
         var device = HidLink.Single(Protocols.AioPid);
@@ -121,7 +124,7 @@ internal sealed class AioLcd : ILcd
     }
     public void Send(byte[] jpeg) { foreach (var packet in Protocols.AioJpeg(jpeg)) link.Write(packet); }
     public void Heartbeat() => link.GetFeature(0x0f);
-    public void Dispose() => link.Dispose();
+    public void Dispose() { if (Interlocked.Exchange(ref disposed, 1) == 0) link.Dispose(); }
 }
 
 internal interface IFanController : IDisposable

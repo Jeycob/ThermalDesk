@@ -9,6 +9,38 @@ namespace ThermalDesk.App;
 internal static class WidgetChecks
 {
     [DllImport("user32.dll")] private static extern int GetGuiResources(IntPtr process, int flags);
+    public static int BenchmarkDisplayLoops(string output)
+    {
+        // Fully injected transports/sensors: never opens HID, LHM, saved profiles or a UI.
+        var settings = new Settings(); settings.Panel.Enabled = settings.Aio.Enabled = true;
+        settings.Panel.FramesPerSecond = settings.Aio.FramesPerSecond = 10;
+        settings.Panel.UseCustomLayout = settings.Aio.UseCustomLayout = true;
+        settings.Panel.Widgets = WidgetLayout.Defaults(480, 128); settings.Aio.Widgets = WidgetLayout.Defaults(480, 480);
+        var panel = new TestLcd(); var aio = new TestLcd();
+        var engine = new Engine(_ => throw new InvalidOperationException("No fan controller permitted in benchmark"), () => new(DateTimeOffset.UtcNow, 46, 42, 10, 20, 35), () => [], displayFactory: (isPanel, _) => isPanel ? panel : aio);
+        var samples = new List<object>(); using var process = Process.GetCurrentProcess(); var clock = Stopwatch.StartNew();
+        TimeSpan baseline = TimeSpan.Zero; double baselineTime = 0;
+        try
+        {
+            engine.Start(settings, true);
+            for (int second = 0; second <= 20; second++)
+            {
+                if (second == 5) { baseline = process.TotalProcessorTime; baselineTime = clock.Elapsed.TotalSeconds; }
+                if (second >= 5 && second % 5 == 0)
+                {
+                    process.Refresh(); samples.Add(new { seconds = second, workingSetMiB = process.WorkingSet64 / 1048576d, threads = process.Threads.Count, handles = process.HandleCount, gdiObjects = GetGuiResources(process.Handle, 0), userObjects = GetGuiResources(process.Handle, 1), panelFrames = Volatile.Read(ref panel.Frames), aioFrames = Volatile.Read(ref aio.Frames) });
+                }
+                if (second < 20) Thread.Sleep(1000);
+            }
+            double cpuPercent = (process.TotalProcessorTime - baseline).TotalSeconds / (clock.Elapsed.TotalSeconds - baselineTime) / Environment.ProcessorCount * 100;
+            Task.Run(async () => await engine.Stop()).GetAwaiter().GetResult();
+            bool passed = panel.Frames >= 100 && aio.Frames >= 100 && panel.Disposals == 1 && aio.Disposals == 1;
+            Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+            File.WriteAllText(output, JsonSerializer.Serialize(new { passed, hardwareAccess = false, workload = "Two LCD render/JPEG loops at up to 10 FPS each; mock transport additionally decodes/hashes JPEGs. No USB, sensor driver or real hardware timing.", logicalProcessors = Environment.ProcessorCount, seconds = clock.Elapsed.TotalSeconds, averageTotalCpuPercent = cpuPercent, panelFrames = panel.Frames, aioFrames = aio.Frames, samples }, Settings.JsonOptions));
+            return passed ? 0 : 1;
+        }
+        finally { Task.Run(async () => await engine.Stop()).GetAwaiter().GetResult(); }
+    }
     public static int Run(string directory)
     {
         Directory.CreateDirectory(directory);
@@ -189,6 +221,7 @@ internal static class WidgetChecks
             try { new Engine(_ => throw new Exception("No device should open"), () => t, () => []).Start(new Settings(), true); }
             catch (ArgumentException) { emptyBlocked = true; }
             Check(emptyBlocked, "Empty live selection must be rejected before opening a device.");
+            count += CheckDisplayWorkers(t);
             using var process = Process.GetCurrentProcess();
             using var repeated = new FrameRenderer();
             using (var warmup = repeated.Render(t, restored.Aio, 480, 480)) { }
@@ -202,6 +235,102 @@ internal static class WidgetChecks
         }
         catch (Exception e)
         { File.WriteAllText(Path.Combine(directory, "widget-checks.json"), JsonSerializer.Serialize(new { passed = false, checks = count, hardwareAccess = false, error = e.ToString() }, Settings.JsonOptions)); return 1; }
+    }
+    private static int CheckDisplayWorkers(Telemetry telemetry)
+    {
+        int count = 0;
+        void Check(bool condition, string name) { count++; if (!condition) throw new InvalidOperationException("LCD worker: " + name); }
+        bool Wait(Func<bool> condition) => SpinWait.SpinUntil(condition, 5000);
+        var settings = new Settings();
+        settings.Panel.Enabled = settings.Aio.Enabled = true;
+        settings.Panel.FramesPerSecond = settings.Aio.FramesPerSecond = 10;
+        settings.Panel.UseCustomLayout = settings.Aio.UseCustomLayout = true;
+        settings.Panel.Brightness = 43; settings.Aio.Brightness = 67;
+        settings.Panel.Widgets = [new() { Source = WidgetSource.Text, TextTemplate = "PANEL BEFORE", X = 8, Y = 8, Width = 460, Height = 100 }];
+        settings.Aio.Widgets = [new() { Source = WidgetSource.Text, TextTemplate = "AIO BEFORE", X = 8, Y = 8, Width = 460, Height = 100 }];
+        int panelOpens = 0, aioOpens = 0, wrongBrightness = 0;
+        var panel = new TestLcd(); var aio = new TestLcd();
+        var engine = new Engine(_ => throw new InvalidOperationException("No fan controller should open"), () => telemetry with { Time = DateTimeOffset.UtcNow }, () => [], displayFactory: (isPanel, brightness) =>
+        {
+            if (isPanel) { Interlocked.Increment(ref panelOpens); if (brightness != 43) Interlocked.Increment(ref wrongBrightness); return panel; }
+            Interlocked.Increment(ref aioOpens); if (brightness != 67) Interlocked.Increment(ref wrongBrightness); return aio;
+        });
+        engine.Start(settings, true);
+        try
+        {
+            Check(Wait(() => Volatile.Read(ref panel.Frames) > 0 && Volatile.Read(ref aio.Frames) > 0), "both physical-format frame pipelines start through fake transports");
+            Check(panel.Width == 480 && panel.Height == 128 && aio.Width == 480 && aio.Height == 480, "each transport receives valid JPEG at the correct native size");
+            Check(wrongBrightness == 0 && panelOpens == 1 && aioOpens == 1, "each transport receives its own brightness and one connection");
+            string beforePanel = Volatile.Read(ref panel.Hash), beforeAio = Volatile.Read(ref aio.Hash);
+            var edited = settings.Copy(); edited.Panel.Widgets[0].TextTemplate = "PANEL AFTER"; edited.Aio.Widgets[0].TextTemplate = "AIO AFTER";
+            engine.ApplyLiveSettings(edited);
+            Check(Wait(() => Volatile.Read(ref panel.Hash) != beforePanel && Volatile.Read(ref aio.Hash) != beforeAio), "both changed widget layouts reach the next frames without restarting");
+            Check(panelOpens == 1 && aioOpens == 1 && !engine.ControllerFault, "layout edits do not reconnect either LCD or invent a fan fault");
+            Check(Volatile.Read(ref panel.Heartbeats) > 0 && Volatile.Read(ref aio.Heartbeats) > 0, "both display workers send heartbeats");
+        }
+        finally { Task.Run(async () => await engine.Stop()).GetAwaiter().GetResult(); }
+        Check(panel.Disposals == 1 && aio.Disposals == 1, "Stop disposes each successful transport exactly once");
+        int stoppedFrames = panel.Frames + aio.Frames; Thread.Sleep(50);
+        Check(panel.Frames + aio.Frames == stoppedFrames && !engine.Running, "Stop leaves no background frame writers");
+
+        int fanOpens = 0, retryPanel = 0, retryAio = 0;
+        var fan = new TestController(); var recoveredPanel = new TestLcd(); var failedAio = new TestLcd { FailHeartbeat = true }; var recoveredAio = new TestLcd();
+        var retrySettings = settings.Copy(); retrySettings.CoolingEnabled = retrySettings.CoolingWiringConfirmed = true;
+        retrySettings.Ports[0].Role = PortRole.Fan; retrySettings.Ports[0].Mode = ControlMode.Fixed; retrySettings.Ports[0].FixedDuty = 40;
+        var retry = new Engine(_ => { Interlocked.Increment(ref fanOpens); return fan; }, () => telemetry with { Time = DateTimeOffset.UtcNow, CpuTemperature = 40, GpuTemperature = 40 }, () => [], displayFactory: (isPanel, _) =>
+        {
+            if (isPanel) { if (Interlocked.Increment(ref retryPanel) < 3) throw new IOException("Injected absent chassis LCD"); return recoveredPanel; }
+            return Interlocked.Increment(ref retryAio) == 1 ? failedAio : recoveredAio;
+        }, lcdRetryDelay: TimeSpan.FromMilliseconds(50));
+        retry.Start(retrySettings, true);
+        try
+        {
+            Check(Wait(() => recoveredPanel.Frames > 0 && recoveredAio.Frames > 0 && fan.DutyWrites > 0), "temporarily absent panel and failed AX heartbeat independently recover");
+            Check(retryPanel == 3 && retryAio == 2 && failedAio.Disposals == 1, "failed display instance is disposed before a bounded retry");
+            Check(fanOpens == 1 && fan.FirstDuty == 40 && fan.LastDuty == 40 && !retry.ControllerFault, "LCD failures cannot restart or accelerate mock cooling");
+            Check(retry.Logs.Any(line => line.Contains("Injected absent chassis LCD")) && retry.Logs.Any(line => line.Contains("Injected LCD heartbeat failure")), "display faults remain visible in diagnostics");
+        }
+        finally { Task.Run(async () => await retry.Stop()).GetAwaiter().GetResult(); }
+        Check(recoveredPanel.Disposals == 1 && recoveredAio.Disposals == 1 && failedAio.Disposals == 1, "all connected and failed displays close exactly once");
+
+        int absentAttempts = 0;
+        var cancelSettings = new Settings(); cancelSettings.Aio.Enabled = true;
+        var cancel = new Engine(_ => throw new InvalidOperationException("No controller access"), () => telemetry with { Time = DateTimeOffset.UtcNow }, () => [], displayFactory: (_, _) => { Interlocked.Increment(ref absentAttempts); throw new IOException("Injected unplugged display"); });
+        cancel.Start(cancelSettings, true);
+        Check(Wait(() => Volatile.Read(ref absentAttempts) == 1), "absent LCD enters retry delay");
+        var stopping = Stopwatch.StartNew(); Task.Run(async () => await cancel.Stop()).GetAwaiter().GetResult();
+        Check(stopping.Elapsed < TimeSpan.FromSeconds(2) && absentAttempts == 1 && !cancel.Running, "cancellation interrupts five-second display retry without a second open");
+
+        int uncertainOpens = 0;
+        var uncertain = new TestLcd { FailHeartbeat = true, FailDispose = true }; var stablePanel = new TestLcd(); var unaffectedFan = new TestController();
+        var uncertainEngine = new Engine(_ => unaffectedFan, () => telemetry with { Time = DateTimeOffset.UtcNow, CpuTemperature = 40, GpuTemperature = 40 }, () => [], displayFactory: (isPanel, _) =>
+        { if (isPanel) return stablePanel; Interlocked.Increment(ref uncertainOpens); return uncertain; }, lcdRetryDelay: TimeSpan.FromMilliseconds(50));
+        uncertainEngine.Start(retrySettings, true);
+        try
+        {
+            Check(Wait(() => stablePanel.Frames >= 3 && uncertain.Disposals == 1 && unaffectedFan.DutyWrites > 0), "display close fault does not stop the other display or cooling");
+            Check(uncertainOpens == 1 && uncertainEngine.Status["TOUGHLIQUID AX"].Contains("retry blocked") && !uncertainEngine.ControllerFault, "uncertain USB release latches only its display, without blind reconnect");
+            Check(unaffectedFan.LastDuty == 40, "display release error cannot produce full-speed fan fallback");
+        }
+        finally { Task.Run(async () => await uncertainEngine.Stop()).GetAwaiter().GetResult(); }
+        Check(uncertain.Disposals == 1 && stablePanel.Disposals == 1, "Stop does not repeatedly dispose an uncertain failed display");
+        var brokenFrames = new TestLcd { FailDispose = true }; var commands = new TestLcd();
+        bool pairFailure = false; try { PanelLcd.DisposeInterfaces(brokenFrames, commands); } catch (IOException) { pairFailure = true; }
+        Check(pairFailure && brokenFrames.Disposals == 1 && commands.Disposals == 1, "both chassis interfaces receive close even when the first fails");
+        return count;
+    }
+    private sealed class TestLcd : ILcd
+    {
+        public int Frames, Heartbeats, Disposals, Width, Height;
+        public string Hash = "";
+        public bool FailHeartbeat, FailDispose;
+        public void Send(byte[] jpeg)
+        {
+            using var stream = new MemoryStream(jpeg, writable: false); using var image = Image.FromStream(stream);
+            Width = image.Width; Height = image.Height; Volatile.Write(ref Hash, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(jpeg))); Interlocked.Increment(ref Frames);
+        }
+        public void Heartbeat() { if (FailHeartbeat) throw new IOException("Injected LCD heartbeat failure"); Interlocked.Increment(ref Heartbeats); }
+        public void Dispose() { Interlocked.Increment(ref Disposals); if (FailDispose) throw new IOException("Injected LCD close failure"); }
     }
     private sealed class TestController : IFanController
     {

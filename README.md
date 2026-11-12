@@ -231,9 +231,19 @@ Render the simulated UI without opening devices:
 ```powershell
 .\ThermalDesk.exe --render-preview preview.png
 .\ThermalDesk.exe --widget-check C:\path\widget-test-output
+# Local worst-cadence render/JPEG benchmark, 20 seconds; fully fake transports/sensors.
+.\ThermalDesk.exe --benchmark-display-loops C:\path\display-loop-benchmark.json
 ```
 
 Tests cover protocol boundaries, cooling safety, sensors, profile persistence, widget formatting/bounds, independent layouts, UI editing actions and repeated rendering. Automated tests do not exercise hardware. See `VALIDATION.txt` for actual acceptance status.
+
+Mock integration checks drive both LCD output loops, native-size JPEGs, heartbeats,
+in-place layout changes, delayed connection, failed heartbeat, cancellation and
+failed close. An LCD transport error does not restart the fan controller. Ordinary
+LCD connection errors retry after five seconds; an uncertain close latches that
+display and blocks reconnect until Stop/review. Both chassis interfaces receive a
+close attempt even if one fails. None of this proves Windows sleep/resume or a
+physical unplug/replug has passed on your devices.
 
 ## Troubleshooting
 

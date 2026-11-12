@@ -10,12 +10,17 @@ internal sealed class Engine
     private readonly Func<Telemetry>? testTelemetry;
     private readonly Func<string[]> conflicts;
     private readonly TimeSpan initialTemperatureTimeout;
+    private readonly Func<bool, int, ILcd> openDisplay;
+    private readonly TimeSpan displayRetryDelay;
     public Engine() : this(serial => new FanController(serial), null, Conflicts) { }
-    internal Engine(Func<string, IFanController> controllerFactory, Func<Telemetry>? telemetryReader, Func<string[]> findConflicts, TimeSpan? startupTimeout = null)
+    internal Engine(Func<string, IFanController> controllerFactory, Func<Telemetry>? telemetryReader, Func<string[]> findConflicts, TimeSpan? startupTimeout = null, Func<bool, int, ILcd>? displayFactory = null, TimeSpan? lcdRetryDelay = null)
     {
         openController = controllerFactory; testTelemetry = telemetryReader; conflicts = findConflicts;
         initialTemperatureTimeout = startupTimeout ?? TimeSpan.FromSeconds(20);
         if (initialTemperatureTimeout <= TimeSpan.Zero || initialTemperatureTimeout > TimeSpan.FromMinutes(1)) throw new ArgumentOutOfRangeException(nameof(startupTimeout));
+        openDisplay = displayFactory ?? ((panel, brightness) => panel ? new PanelLcd(brightness) : new AioLcd(brightness));
+        displayRetryDelay = lcdRetryDelay ?? TimeSpan.FromSeconds(5);
+        if (displayRetryDelay < TimeSpan.FromMilliseconds(20) || displayRetryDelay > TimeSpan.FromMinutes(1)) throw new ArgumentOutOfRangeException(nameof(lcdRetryDelay));
     }
     private CancellationTokenSource? stop;
     private Task[] tasks = [];
@@ -160,9 +165,10 @@ internal sealed class Engine
             while (!token.IsCancellationRequested)
             {
                 ILcd? lcd = null;
+                bool releaseFailed = false;
                 try
                 {
-                    Guard(token); lcd = panel ? new PanelLcd(settings.Brightness) : new AioLcd(settings.Brightness);
+                    Guard(token); lcd = openDisplay(panel, settings.Brightness);
                     SetStatus(name, "Connected · " + settings.Content);
                     while (!token.IsCancellationRequested)
                     {
@@ -176,8 +182,17 @@ internal sealed class Engine
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
                 catch (Exception e) { SetStatus(name, "ERROR · " + e.Message); }
-                finally { lcd?.Dispose(); }
-                await Task.Delay(TimeSpan.FromSeconds(5), token);
+                finally
+                {
+                    try { lcd?.Dispose(); }
+                    catch (Exception error)
+                    {
+                        releaseFailed = true;
+                        SetStatus(name, "ERROR · close failed; retry blocked until Stop/review · " + error.Message);
+                    }
+                }
+                if (releaseFailed) return;
+                await Task.Delay(displayRetryDelay, token);
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }

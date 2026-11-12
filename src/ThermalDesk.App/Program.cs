@@ -12,6 +12,7 @@ internal static class Program
         try { StartupManager.WaitForPrevious(args); }
         catch (Exception error) { MessageBox.Show(error.Message, "ThermalDesk restart blocked"); return 1; }
         if (args.Length == 2 && args[0] == "--widget-check") return WidgetChecks.Run(Path.GetFullPath(args[1]));
+        if (args.Length == 2 && args[0] == "--benchmark-display-loops") return WidgetChecks.BenchmarkDisplayLoops(Path.GetFullPath(args[1]));
         string[] checks = ["--sensor-check", "--fan-status-check", "--fan-curve-acceptance", "--controller-stability-check", "--controller-profile-check", "--aio-firmware-check", "--aio-display-check", "--panel-display-check"];
         if (args.Length == 2 && checks.Contains(args[0])) return HardwareChecks.Run(args[0], args[1]);
         if (args.Contains("--diagnose"))

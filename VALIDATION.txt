@@ -269,3 +269,25 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
 - Initial capture-loss fixture incorrectly expected history count to increase
   after replacing a redo branch. Fixed the fixture to verify actual geometry,
   single-step Undo and discarded redo state. No production failure was hidden.
+
+0.3.10 SOFTWARE-ONLY DISPLAY LIFECYCLE FOLLOW-UP
+- Injected fake LCD transports now exercise the actual two background display
+  loops, not only static bitmap previews. Native JPEG sizes and separate
+  brightness/heartbeats verified. Widget edits reach both outputs in place.
+- Delayed panel presence and failed AX heartbeat recover independently while
+  the fake fan controller stays connected once at40%, never100%.
+- Stop cancels the five-second LCD retry immediately. All successful transports
+  close once, and no frame writer remains after Stop.
+- Found/fixed a real close-exception gap: it previously escaped the worker.
+  Close failure is now visibly latched per display, with no blind reopen of an
+  uncertain handle. The other LCD and cooling continue independently.
+- Both chassis interfaces are closed in try/finally; LCD disposal is idempotent.
+- Added a20-second no-hardware render/JPEG loop benchmark at the maximum10 FPS
+  per LCD. It includes fake decode/hash overhead but excludes physical USB and
+  sensor drivers. This is not a target-PC hardware benchmark or sleep/resume test.
+- 953 unchanged core assertions and167 UI/mock checks. Physical connectivity,
+  hotplug, cold boot and sleep/resume acceptance remain outstanding.
+- Local20.3-second display-loop benchmark:177 frames per LCD, average0.595%
+  total CPU across16 logical processors,60.5..64.0 MiB working set,15 threads,
+  GDI3 and USER7 constant. Mock decode/hash overhead included; no claim about
+  real USB throughput, hardware driver load or long-duration leak freedom.
