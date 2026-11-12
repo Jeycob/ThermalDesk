@@ -19,13 +19,13 @@ internal static class WidgetChecks
         var panel = new TestLcd(); var aio = new TestLcd();
         var engine = new Engine(_ => throw new InvalidOperationException("No fan controller permitted in benchmark"), () => new(DateTimeOffset.UtcNow, 46, 42, 10, 20, 35), () => [], displayFactory: (isPanel, _) => isPanel ? panel : aio);
         var samples = new List<object>(); using var process = Process.GetCurrentProcess(); var clock = Stopwatch.StartNew();
-        TimeSpan baseline = TimeSpan.Zero; double baselineTime = 0;
+        TimeSpan baseline = TimeSpan.Zero; double baselineTime = 0; long allocated = 0;
         try
         {
             engine.Start(settings, true);
             for (int second = 0; second <= 20; second++)
             {
-                if (second == 5) { baseline = process.TotalProcessorTime; baselineTime = clock.Elapsed.TotalSeconds; }
+                if (second == 5) { baseline = process.TotalProcessorTime; baselineTime = clock.Elapsed.TotalSeconds; allocated = GC.GetTotalAllocatedBytes(false); }
                 if (second >= 5 && second % 5 == 0)
                 {
                     process.Refresh(); samples.Add(new { seconds = second, workingSetMiB = process.WorkingSet64 / 1048576d, threads = process.Threads.Count, handles = process.HandleCount, gdiObjects = GetGuiResources(process.Handle, 0), userObjects = GetGuiResources(process.Handle, 1), panelFrames = Volatile.Read(ref panel.Frames), aioFrames = Volatile.Read(ref aio.Frames) });
@@ -36,7 +36,7 @@ internal static class WidgetChecks
             Task.Run(async () => await engine.Stop()).GetAwaiter().GetResult();
             bool passed = panel.Frames >= 100 && aio.Frames >= 100 && panel.Disposals == 1 && aio.Disposals == 1;
             Directory.CreateDirectory(Path.GetDirectoryName(output)!);
-            File.WriteAllText(output, JsonSerializer.Serialize(new { passed, hardwareAccess = false, workload = "Two LCD render/JPEG loops at up to 10 FPS each; mock transport additionally decodes/hashes JPEGs. No USB, sensor driver or real hardware timing.", logicalProcessors = Environment.ProcessorCount, seconds = clock.Elapsed.TotalSeconds, averageTotalCpuPercent = cpuPercent, panelFrames = panel.Frames, aioFrames = aio.Frames, samples }, Settings.JsonOptions));
+            File.WriteAllText(output, JsonSerializer.Serialize(new { passed, hardwareAccess = false, workload = "Two LCD loops at up to 10 FPS each, with unchanged-frame JPEG reuse; mock transport additionally decodes/hashes JPEGs. No USB, sensor driver or real hardware timing.", logicalProcessors = Environment.ProcessorCount, seconds = clock.Elapsed.TotalSeconds, averageTotalCpuPercent = cpuPercent, allocatedMiBAfterWarmup = (GC.GetTotalAllocatedBytes(false) - allocated) / 1048576d, renders = engine.FrameRenderCounts, panelFrames = panel.Frames, aioFrames = aio.Frames, samples }, Settings.JsonOptions));
             return passed ? 0 : 1;
         }
         finally { Task.Run(async () => await engine.Stop()).GetAwaiter().GetResult(); }
@@ -49,6 +49,45 @@ internal static class WidgetChecks
         void Check(bool value, string message) { count++; if (!value) throw new InvalidOperationException(message); }
         try
         {
+            count += RgbControlChecks.Run();
+            count += NewWidgetChecks.Run(directory);
+            count += LogAndPerformanceChecks.Run(directory);
+            count += PowerGraphChecks.Run(directory);
+            foreach (var shape in new[] { (Width: 480, Height: 128), (Width: 480, Height: 480) })
+            {
+                using var editor = new DisplayEditor("Offline preset checks", new DisplaySettings { Brightness = 43, FramesPerSecond = 3 }, shape.Width, shape.Height, () => t);
+                count += editor.ExercisePresetsForTest(shape.Width, shape.Height);
+                foreach (var preset in LcdPresets.Available(shape.Width, shape.Height))
+                {
+                    var s = LcdPresets.Create(new(), preset.Id, shape.Width, shape.Height);
+                    using var renderer = new FrameRenderer();
+                    using var image = renderer.Render(t, s, shape.Width, shape.Height);
+                    Check(image.Width == shape.Width && image.Height == shape.Height, "Preset keeps the physical USB frame size: " + preset.Id);
+                    using var wire = new MemoryStream(FrameRenderer.Jpeg(image)); using var decoded = new Bitmap(wire);
+                    Check(decoded.Width == shape.Width && decoded.Height == shape.Height, "Preset JPEG keeps native resolution: " + preset.Id);
+                    image.Save(Path.Combine(directory, "preset-" + preset.Id + "-physical.png"), ImageFormat.Png);
+                    // Upright installation preview: portrait panels are physically mounted sideways.
+                    if (preset.Portrait) image.RotateFlip(RotateFlipType.Rotate270FlipNone);
+                    image.Save(Path.Combine(directory, "preset-" + preset.Id + "-upright.png"), ImageFormat.Png);
+                    foreach (int angle in shape.Width == shape.Height ? new[] { 0, 90, 180, 270 } : preset.Portrait ? new[] { 90, 270 } : new[] { 0, 180 })
+                    {
+                        s.Rotation = angle; WidgetLayout.Validate(s, shape.Width, shape.Height);
+                        using var rotated = renderer.Render(t, s, shape.Width, shape.Height);
+                        Check(rotated.Width == shape.Width && rotated.Height == shape.Height, "Inverted mounting retains native resolution: " + preset.Id);
+                    }
+                    var logical = WidgetLayout.Canvas(s, shape.Width, shape.Height);
+                    using var measureImage = new Bitmap(logical.Width, logical.Height); using var graphics = Graphics.FromImage(measureImage);
+                    foreach (var widget in s.Widgets.Where(w => w.Kind == WidgetKind.Text || w.GaugeShowText))
+                    {
+                        using var font = new Font(widget.FontFamily, widget.FontSize, widget.Bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
+                        var value = WidgetLayout.Format(widget, t with { CpuTemperature = 100, GpuTemperature = 100, CpuLoad = 100, GpuLoad = 100, MemoryUsedPercent = 100 });
+                        var measured = LogWidget.IsLog(widget.Source) && widget.LogAutoFit ? renderer.MeasureLogText(graphics, widget, value) : graphics.MeasureString(value, font);
+                        Check(measured.Width <= widget.Width, "Preset text must not ellipsize at 100: " + preset.Id + "/" + widget.Name);
+                        float textHeight = LogWidget.IsLog(widget.Source) ? measured.Height : font.Size;
+                        Check(textHeight <= widget.Height, $"Preset font must fit its height: {preset.Id}/{widget.Name} ({textHeight:0.0} > {widget.Height})");
+                    }
+                }
+            }
             Check(FrameRenderer.FormatTemperature(100) == "100 °C", "Built-in LCD dashboard shows explicit Celsius units");
             Check(FrameRenderer.FormatTemperature(null) == "—" && FrameRenderer.FormatTemperature(double.NaN) == "—", "Built-in dashboard never formats missing or non-finite temperatures as valid data");
             foreach (var size in new[] { (480, 128), (480, 480) })
@@ -92,6 +131,11 @@ internal static class WidgetChecks
             { form.RenderForTest(Path.Combine(directory, "designer-wide.png")); Check(form.Result.Widgets.Count == 5, "Wide designer must keep widgets."); count += form.ExerciseForTest(); }
             using (var form = new MainForm(restored, path)) form.RenderPreview(Path.Combine(directory, "main-widgets.png"));
             using (var form = new MainForm(new Settings(), Path.Combine(directory, "automatic-settings.json"))) count += form.ExerciseAutomaticSettingsForTest();
+            using (var form = new MainForm(new Settings(), Path.Combine(directory, "profile-import-settings.json"))) count += form.ExerciseProfileImportForTest(directory);
+            using (var form = new MainForm(new Settings(), Path.Combine(directory, "window-settings.json"))) count += form.ExerciseWindowPreferencesForTest(Path.Combine(directory, "window-preferences.png"));
+            Check(ProcessActivityMonitor.TryParseInstance("pid_1234_luid_0x00000000_0x00012345_phys_0_eng_0_engtype_Compute", out int parsedPid, out string parsedEngine) && parsedPid == 1234 && parsedEngine == "Compute", "GPU counter PID/engine parser");
+            Check(!ProcessActivityMonitor.TryParseInstance("pid_bad_luid_x_engtype_3D", out _, out _) && !ProcessActivityMonitor.TryParseInstance("unrelated", out _, out _), "malformed GPU instances ignored");
+            using (var form = new MainForm(new Settings(), Path.Combine(directory, "ui-lifecycle-settings.json"))) count += form.ExerciseUiLifecycleForTest(Path.Combine(directory, "display-settings-minimum.png"));
             using (var form = new PortEditorForm(new PortSettings { Port = 1 })) count += form.ExerciseForTest(Path.Combine(directory, "port-editor.png"));
             var sourceTelemetry = t with { CpuTemperatureSource = "Core (Tctl/Tdie)", CpuMaximumTemperatureSource = "CPU CCD1 (Tdie)", GpuDeviceId = "rtx", GpuDeviceName = "NVIDIA RTX 4080", GpuTemperatureSource = "GPU Core", MemoryLoadSource = "Memory", GpuDevices = [new("rtx", "NVIDIA RTX 4080"), new("igpu", "Integrated AMD")] };
             using (var sourceForm = new Form { ClientSize = new Size(900, 500), Font = new Font("Segoe UI", 10), StartPosition = FormStartPosition.Manual, Location = new Point(-20000, -20000), ShowInTaskbar = false })
@@ -203,8 +247,31 @@ internal static class WidgetChecks
             bool blocked = false; try { conflict.Start(rgbSettings, true); } catch (InvalidOperationException) { blocked = true; }
             Check(blocked && !conflict.Running, "Conflicting vendor process must block before device access.");
             var startup = new Settings { Aio = new DisplaySettings { Enabled = true }, StartLiveAtSignIn = true };
+            Check(StartupManager.ShouldRequestElevation([], false), "Normal interactive launch requests administrator consent");
+            Check(StartupManager.ShouldRequestElevation(["--minimized"], false), "Limited sign-in preview cannot silently stay unelevated");
+            Check(StartupManager.ShouldRequestElevation(["--startup", "--minimized"], false), "Limited startup requests elevation without changing its explicit arguments");
+            Check(!StartupManager.ShouldRequestElevation([], true), "Elevated sign-in task does not request another UAC launch");
+            Check(new[] { "--widget-check", "--benchmark-display-loops", "--render-preview", "--benchmark-preview" }.All(command => !StartupManager.ShouldRequestElevation([command, "output"], false)), "Exact software-only check commands stay unprivileged");
+            Check(StartupManager.ShouldRequestElevation(["--widget-check"], false), "Incomplete offline command cannot bypass normal elevation policy");
+            Check(StartupManager.ShouldRequestElevation(["--render-preview", "output", "--startup"], false), "Mixed malformed arguments are not whitelisted as offline mode");
+            var elevation = StartupManager.ElevationStartInfo(@"C:\Program Files\ThermalDesk\ThermalDesk.exe", ["--preview", "--status-output", @"C:\A directory\status.json"]);
+            Check(elevation.UseShellExecute && elevation.Verb == "runas" && elevation.FileName == @"C:\Program Files\ThermalDesk\ThermalDesk.exe" && elevation.WorkingDirectory == @"C:\Program Files\ThermalDesk", "Elevation uses Windows consent and exact executable/working directory");
+            Check(elevation.ArgumentList.SequenceEqual(new[] { "--preview", "--status-output", @"C:\A directory\status.json" }), "Elevation preserves arguments without inserting hidden live flags");
+            Check(!StartupManager.ShouldStartLive(startup, elevation.ArgumentList.ToArray(), false), "Elevated manual preview stays preview even with armed saved live startup");
             Check(StartupManager.ShouldStartLive(startup, ["--startup", "--minimized"], false), "Explicit armed sign-in should use its saved profile.");
-            Check(!StartupManager.ShouldStartLive(startup, [], false), "Manual launch must remain preview even with an armed profile.");
+            Check(StartupManager.ShouldStartLive(startup, [], false), "Manual launch resumes a previously armed saved profile.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--preview"], false), "Explicit Preview bypasses an armed saved profile.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--preview", "--live-once", "--startup"], false), "Explicit Preview wins over all automatic/live flags.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--minimized"], false), "Legacy Preview Run entry cannot become Live when manual resume is enabled.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--startup", "--preview", "--minimized"], false), "Explicit Preview sign-in always remains Preview.");
+            startup.ResumeLastProfileOnLaunch = false;
+            Check(!StartupManager.ShouldStartLive(startup, [], false), "Explicit resume opt-out keeps manual launch in Preview.");
+            Check(StartupManager.ShouldStartLive(startup, ["--startup"], false), "Manual resume preference does not alter separately armed sign-in startup.");
+            startup.ResumeLastProfileOnLaunch = true; startup.StartLiveAtSignIn = false;
+            Check(StartupManager.ShouldStartLive(startup, [], false), "Explicit manual resume does not require a Windows sign-in task.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--startup"], false), "Manual resume never arms Windows sign-in Live by itself.");
+            Check(!StartupManager.ShouldStartLive(startup, [], true), "Shift bypasses saved manual resume.");
+            startup.ResumeLastProfileOnLaunch = null; startup.StartLiveAtSignIn = true;
             Check(!StartupManager.ShouldStartLive(startup, ["--startup"], true), "Shift must bypass live startup.");
             startup.StartLiveAtSignIn = false;
             Check(!StartupManager.ShouldStartLive(startup, ["--startup"], false), "Unarmed profile cannot auto-start hardware.");
@@ -213,7 +280,23 @@ internal static class WidgetChecks
             Check(!StartupManager.ShouldStartLive(startup, ["--live-once"], false, true), "Recovered profile cannot be armed by a one-time startup flag");
             startup.StartLiveAtSignIn = true;
             Check(!StartupManager.ShouldStartLive(startup, ["--startup"], false, true), "Recovered profile cannot be armed by a scheduled sign-in launch");
-            Check(StartupManager.ShouldStartMinimized(["--minimized"], false) && !StartupManager.ShouldStartMinimized(["--minimized"], true), "Recovery warning cannot be hidden by a minimized sign-in flag");
+            startup.ResumeLastProfileOnLaunch = true;
+            Check(!StartupManager.ShouldStartLive(startup, [], false, true), "Recovered profile cannot auto-resume even with an explicit saved preference");
+            startup.Aio.Enabled = false; startup.Panel.Enabled = false; startup.AllowMonitoringOnly = false;
+            Check(!StartupManager.ShouldStartLive(startup, [], false), "No selected live output means Preview despite saved resume preference");
+            Check(StartupManager.ShouldStartMinimized(new Settings(), ["--minimized"], false) && !StartupManager.ShouldStartMinimized(new Settings(), ["--minimized"], true), "Recovery warning cannot be hidden by a minimized sign-in flag");
+            var windowPreferences = new Settings { MinimizeAfterStartup = true, MinimizeWhenClosed = true };
+            Check(StartupManager.ShouldStartMinimized(windowPreferences, [], false), "saved minimize preference works for a normal launch");
+            Check(!StartupManager.ShouldStartMinimized(windowPreferences, [], true), "recovery stays visible with saved minimize enabled");
+            Check(!StartupManager.ShouldStartMinimized(windowPreferences, [], false, true), "Shift overrides minimize for troubleshooting");
+            Check(!StartupManager.ShouldStartMinimized(windowPreferences, ["--show-window"], false), "explicit show-window overrides saved minimize");
+            windowPreferences.MinimizeAfterStartup = false;
+            Check(!StartupManager.ShouldStartMinimized(windowPreferences, ["--startup", "--minimized"], false), "unchecked preference overrides a legacy minimized startup task");
+            Check(!StartupManager.ShouldStartLive(windowPreferences, [], false), "window preferences never arm live hardware");
+            Check(StartupManager.ShouldHideOnClose(true, CloseReason.UserClosing, false), "X / Alt-F4 hides only when enabled");
+            Check(!StartupManager.ShouldHideOnClose(false, CloseReason.UserClosing, false), "unchecked close preference still exits");
+            Check(!StartupManager.ShouldHideOnClose(true, CloseReason.UserClosing, true), "explicit tray Exit always bypasses hiding");
+            Check(new[] { CloseReason.WindowsShutDown, CloseReason.TaskManagerClosing, CloseReason.ApplicationExitCall, CloseReason.FormOwnerClosing }.All(reason => !StartupManager.ShouldHideOnClose(true, reason, false)), "shutdown and external close reasons are not trapped in the tray");
             string recoveredPath = Path.Combine(directory, "recovery-ui-profile.json");
             File.WriteAllText(recoveredPath, "null"); var recovered = SettingsStore.LoadForStartup(recoveredPath);
             using (var recoveryForm = new MainForm(recovered.Settings, recoveredPath, startupWarning: recovered.Warning)) count += recoveryForm.VerifyRecoveryUiForTest(Path.Combine(directory, "recovery-ui.png"));
@@ -221,7 +304,17 @@ internal static class WidgetChecks
             try { new Engine(_ => throw new Exception("No device should open"), () => t, () => []).Start(new Settings(), true); }
             catch (ArgumentException) { emptyBlocked = true; }
             Check(emptyBlocked, "Empty live selection must be rejected before opening a device.");
+            var blockedSettings = new Settings { MonitorFanController = true, ResumeLastProfileOnLaunch = true };
+            var blockedEngine = new Engine(_ => throw new Exception("No device may open during conflict fallback"), () => t, () => ["TTRGBPlus"]);
+            try
+            {
+                using var blockedForm = new MainForm(blockedSettings, Path.Combine(directory, "blocked-startup.json"), blockedEngine) { StartupRequested = true };
+                string? reason = blockedForm.StartInitialSession();
+                Check(reason?.Contains("conflicting") == true && blockedEngine.Running && !blockedEngine.Live, "Conflicting automatic startup falls back to hardware-free Preview");
+            }
+            finally { Task.Run(async () => await blockedEngine.Stop()).GetAwaiter().GetResult(); }
             count += CheckDisplayWorkers(t);
+            count += CheckDynamicLiveSettings(t);
             using var process = Process.GetCurrentProcess();
             using var repeated = new FrameRenderer();
             using (var warmup = repeated.Render(t, restored.Aio, 480, 480)) { }
@@ -235,6 +328,74 @@ internal static class WidgetChecks
         }
         catch (Exception e)
         { File.WriteAllText(Path.Combine(directory, "widget-checks.json"), JsonSerializer.Serialize(new { passed = false, checks = count, hardwareAccess = false, error = e.ToString() }, Settings.JsonOptions)); return 1; }
+    }
+    private static int CheckDynamicLiveSettings(Telemetry telemetry)
+    {
+        int checks = 0;
+        void Verify(bool value, string name) { checks++; if (!value) throw new InvalidOperationException("Dynamic live settings: " + name); }
+        bool Wait(Func<bool> value) => SpinWait.SpinUntil(value, 5000);
+        var settings = new Settings { CoolingEnabled = true, CoolingWiringConfirmed = true };
+        settings.Ports[0].Role = PortRole.Fan; settings.Ports[0].Mode = ControlMode.Fixed; settings.Ports[0].FixedDuty = 40;
+        var controller = new TestController(); int opens = 0, panelOpens = 0, aioOpens = 0;
+        var panels = new System.Collections.Concurrent.ConcurrentQueue<TestLcd>();
+        var aios = new System.Collections.Concurrent.ConcurrentQueue<TestLcd>();
+        var brightnesses = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        var engine = new Engine(_ => { Interlocked.Increment(ref opens); return controller; }, () => telemetry with { Time = DateTimeOffset.UtcNow, CpuTemperature = 40, GpuTemperature = 40 }, () => [], displayFactory: (panel, brightness) =>
+        {
+            var lcd = new TestLcd(); brightnesses.Enqueue(brightness);
+            if (panel) { panels.Enqueue(lcd); Interlocked.Increment(ref panelOpens); }
+            else { aios.Enqueue(lcd); Interlocked.Increment(ref aioOpens); }
+            return lcd;
+        });
+        engine.Start(settings, true);
+        try
+        {
+            Verify(Wait(() => controller.DutyWrites > 0), "initial mock cooling starts");
+            Verify(panelOpens == 0 && aioOpens == 0, "disabled LCD workers never open USB");
+            var changed = settings.Copy(); changed.Panel.Enabled = changed.Aio.Enabled = true;
+            changed.Panel.Brightness = 41; changed.Aio.Brightness = 61;
+            changed.Panel.FramesPerSecond = changed.Aio.FramesPerSecond = 10;
+            changed.RgbEnabled = changed.MonitorFanController = true; changed.Ports[0].Rgb = true; changed.Ports[0].RgbColor = "112233";
+            changed.PollSeconds = 3; engine.ApplyLiveSettings(changed);
+            Verify(Wait(() => panels.Any(p => p.Frames > 0) && aios.Any(p => p.Frames > 0) && controller.LightingFrames > 0), "LCDs and RGB enable in the existing session");
+            Verify(opens == 1 && controller.LastDuty == 40 && !engine.ControllerFault, "safe edits never reopen or accelerate fans");
+            var firstPanel = panels.First(); var firstAio = aios.First(); changed.Panel.Brightness = 42;
+            engine.ApplyLiveSettings(changed);
+            Verify(Wait(() => panelOpens == 2 && panels.Last().Frames > 0), "brightness reopens only the affected LCD");
+            Verify(firstPanel.Disposals == 1 && firstAio.Disposals == 0 && aioOpens == 1 && opens == 1 && brightnesses.Contains(42), "brightness uses the new value, preserves other LCD and cooling");
+            changed.Panel.Enabled = false; changed.RgbEnabled = false; changed.MonitorFanController = false;
+            engine.ApplyLiveSettings(changed);
+            Verify(Wait(() => panels.Last().Disposals == 1 && controller.BlackFrames > 0), "disabled LCD releases once and RGB receives one black frame");
+            int disabledFrames = panels.Sum(p => p.Frames), blackFrames = controller.BlackFrames;
+            Thread.Sleep(350);
+            Verify(panels.Sum(p => p.Frames) == disabledFrames && controller.BlackFrames == blackFrames && firstAio.Frames > 0 && opens == 1 && controller.LastDuty == 40,
+                "disabled channels stay idle without shared-controller reset or repeated black writes");
+            changed.Panel.Enabled = true; engine.ApplyLiveSettings(changed);
+            Verify(Wait(() => panelOpens == 3 && panels.Last().Frames > 0), "LCD re-enables without restarting session");
+            Verify(opens == 1 && controller.FirstDuty == 40 && controller.LastDuty == 40, "all dynamic operations preserve cooling at forty percent");
+        }
+        finally { Task.Run(async () => await engine.Stop()).GetAwaiter().GetResult(); }
+        Verify(panels.All(p => p.Disposals == 1) && aios.All(p => p.Disposals == 1), "every enabled/disabled LCD instance closes exactly once");
+
+        var displayOnly = new Settings(); displayOnly.Aio.Enabled = true; displayOnly.Aio.FramesPerSecond = 10;
+        int dormantOpens = 0; var rgbOnly = new TestController(); var display = new TestLcd();
+        var dormant = new Engine(_ => { Interlocked.Increment(ref dormantOpens); return rgbOnly; }, () => telemetry with { Time = DateTimeOffset.UtcNow }, () => [], displayFactory: (_, _) => display);
+        dormant.Start(displayOnly, true);
+        try
+        {
+            Verify(Wait(() => display.Frames > 0) && dormantOpens == 0, "LCD-only session leaves dormant controller worker unopened");
+            var enabled = displayOnly.Copy(); enabled.RgbEnabled = true; enabled.MonitorFanController = true; enabled.Ports[0].Rgb = true;
+            dormant.ApplyLiveSettings(enabled);
+            Verify(Wait(() => dormantOpens == 1 && rgbOnly.LightingFrames > 0 && dormant.Fans.Count == 5), "RGB/monitor enable starts one controller from a display-only session");
+            Verify(rgbOnly.DutyWrites == 0 && !dormant.ControllerFault, "RGB-only activation cannot take over any Preserve fan port");
+            enabled.RgbEnabled = enabled.MonitorFanController = false; dormant.ApplyLiveSettings(enabled);
+            Verify(Wait(() => rgbOnly.BlackFrames == 1 && dormant.Fans.Count == 0), "RGB/monitor disable sends one black frame and clears obsolete readings");
+            int frames = rgbOnly.LightingFrames; Thread.Sleep(350);
+            Verify(rgbOnly.LightingFrames == frames && rgbOnly.DutyWrites == 0 && dormantOpens == 1 && display.Disposals == 0,
+                "disabled RGB sends no continuing writes and does not reconnect controller or LCD");
+        }
+        finally { Task.Run(async () => await dormant.Stop()).GetAwaiter().GetResult(); }
+        return checks;
     }
     private static int CheckDisplayWorkers(Telemetry telemetry)
     {
@@ -334,9 +495,9 @@ internal static class WidgetChecks
     }
     private sealed class TestController : IFanController
     {
-        public int DutyWrites, LightingFrames, LastDuty, FirstDuty = -1;
+        public int DutyWrites, LightingFrames, BlackFrames, LastDuty, FirstDuty = -1;
         public void SetDuty(int port, int duty) { Interlocked.Increment(ref DutyWrites); Interlocked.CompareExchange(ref FirstDuty, duty, -1); LastDuty = duty; }
-        public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) => Interlocked.Increment(ref LightingFrames);
+        public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) { Interlocked.Increment(ref LightingFrames); if (colors.All(c => c == new LedColor(0, 0, 0))) Interlocked.Increment(ref BlackFrames); }
         public FanReading Read(int port) => new(port, 1200 + port * 100, 40);
         public void PrepareToClose(bool criticalTemperature) { }
         public void Dispose() { }

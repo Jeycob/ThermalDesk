@@ -12,6 +12,14 @@ public readonly record struct LedColor(byte Red, byte Green, byte Blue)
 
 public static class Lighting
 {
+    public static bool IsManaged(PortSettings port) => port.Rgb || port.RgbOffRequested;
+    public static string StateLabel(PortSettings port) => port.Rgb ? "ON" : port.RgbOffRequested ? "OFF" : "Unchanged";
+    public static LedColor[] OutputFrame(PortSettings port, string fallback, double elapsedSeconds, Telemetry telemetry)
+    {
+        if (!IsManaged(port)) throw new InvalidOperationException("This port's lighting is not selected for control.");
+        if (port.LedCount is < 1 or > 62) throw new ArgumentException("LED count must be 1–62.");
+        return port.Rgb ? Frame(port, fallback, elapsedSeconds, telemetry) : new LedColor[port.LedCount];
+    }
     public static void ValidatePalette(PortSettings port)
     {
         if (!Enum.IsDefined(port.RgbDirection) || port.RgbPalette is null || port.RgbPalette.Count > 8 ||

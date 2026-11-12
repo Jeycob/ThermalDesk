@@ -2,9 +2,15 @@ using System.Globalization;
 
 namespace ThermalDesk.Core;
 
-public enum WidgetSource { Text, CpuTemperature, GpuTemperature, GpuHotSpotTemperature, GpuMemoryTemperature, CpuLoad, GpuLoad, MemoryUsedPercent, Clock, Date, FanRpm, FanDuty, CpuMaximumTemperature }
+public enum WidgetSource { Text, CpuTemperature, GpuTemperature, GpuHotSpotTemperature, GpuMemoryTemperature, CpuLoad, GpuLoad, MemoryUsedPercent, Clock, Date, FanRpm, FanDuty, CpuMaximumTemperature,
+    GpuVramUsedGiB, GpuVramTotalGiB, GpuVramUsedPercent, CpuClockAverageMhz, CpuClockMaximumMhz, GpuCoreClockMhz, GpuMemoryClockMhz, TopCpuProcess, TopGpuProcess,
+    TextFileLog, TopCpuProcessLog, TopGpuProcessLog, GpuSharedMemoryUsedGiB, GpuSharedMemoryTotalGiB,
+    CpuPowerWatts, GpuPowerWatts, EstimatedTotalPowerWatts, CpuPowerAverageHour, GpuPowerAverageHour, EstimatedTotalPowerAverageHour,
+    CpuEnergyTodayKwh, GpuEnergyTodayKwh, EstimatedTotalEnergyTodayKwh, CpuEnergy24hProjection, GpuEnergy24hProjection, EstimatedTotalEnergy24hProjection,
+    CpuEnergyLast24hKwh, GpuEnergyLast24hKwh, EstimatedTotalEnergyLast24hKwh }
 public enum WidgetAlignment { Left, Center, Right }
-public enum WidgetKind { Text, RadialGauge }
+// Append new values: old saved numeric or named profiles retain their original meaning.
+public enum WidgetKind { Text, RadialGauge, HorizontalGauge, VerticalGauge, RadialSegments, RadialNeedle, RadialRing, RadialSemicircle, LineGraph, BarGraph }
 
 public sealed class LcdWidget
 {
@@ -19,6 +25,8 @@ public sealed class LcdWidget
     public float GaugeSweepAngle { get; set; } = 270;
     public string GaugeTrackColor { get; set; } = "243A49";
     public bool GaugeShowText { get; set; } = true;
+    public int GaugeSegments { get; set; } = 24;
+    public string GaugeTextColor { get; set; } = "";
     public int Port { get; set; } = 1;
     public int X { get; set; } = 20;
     public int Y { get; set; } = 20;
@@ -32,11 +40,45 @@ public sealed class LcdWidget
     public string Foreground { get; set; } = "FFFFFF";
     public string Background { get; set; } = "";
     public WidgetAlignment Alignment { get; set; } = WidgetAlignment.Center;
+    public string LogFilePath { get; set; } = "";
+    public int LogLines { get; set; } = 3;
+    public LogDisplayMode LogDisplay { get; set; }
+    public bool LogAutoFit { get; set; } = true;
+    public int LogStaleSeconds { get; set; } = 60;
+    public int GraphMinutes { get; set; } = 15;
+    public bool GraphAutoScale { get; set; } = true;
+    public bool GraphShowLabels { get; set; } = true;
+    public float GraphLineWidth { get; set; } = 2;
     public override string ToString() => Name;
 }
 
 public static class WidgetLayout
 {
+    public static string RollingEnergyTemplate(WidgetSource source, int width)
+    {
+        string label = source == WidgetSource.CpuEnergyLast24hKwh ? "CPU" : source == WidgetSource.GpuEnergyLast24hKwh ? "GPU" : "PC";
+        return width < 180 ? label + " 24h {value} kWh\n/{coverage} covered" : label + " 24h {value} kWh /{coverage}";
+    }
+    // Existing projection widgets become observed rolling totals at profile load.
+    // Keep old enum values intact so numeric imports never shift other sources.
+    public static void UpgradeEnergyWidgets(Settings settings)
+    {
+        foreach (var display in new[] { settings.Panel, settings.Aio })
+        foreach (var w in display?.Widgets ?? [])
+        {
+            if (w is null) continue; // Validation below reports malformed profiles.
+            WidgetSource? source = w.Source switch { WidgetSource.CpuEnergy24hProjection => WidgetSource.CpuEnergyLast24hKwh,
+                WidgetSource.GpuEnergy24hProjection => WidgetSource.GpuEnergyLast24hKwh,
+                WidgetSource.EstimatedTotalEnergy24hProjection => WidgetSource.EstimatedTotalEnergyLast24hKwh, _ => null };
+            if (source is null) continue;
+            w.Source = source.Value;
+            w.TextTemplate = RollingEnergyTemplate(w.Source, w.Width);
+        }
+    }
+    public static bool IsGraph(WidgetKind kind) => kind is WidgetKind.LineGraph or WidgetKind.BarGraph;
+    public static bool IsGauge(WidgetKind kind) => kind != WidgetKind.Text && !IsGraph(kind);
+    public static bool IsNumeric(WidgetSource source) => source is not (WidgetSource.Text or WidgetSource.Clock or WidgetSource.Date or WidgetSource.TopCpuProcess or WidgetSource.TopGpuProcess) && !LogWidget.IsLog(source);
+    public static bool IsRadial(WidgetKind kind) => kind is WidgetKind.RadialGauge or WidgetKind.RadialSegments or WidgetKind.RadialNeedle or WidgetKind.RadialRing or WidgetKind.RadialSemicircle;
     public static void Reframe(DisplaySettings display, int oldWidth, int oldHeight, int newWidth, int newHeight)
     {
         foreach (var w in display.Widgets)
@@ -46,6 +88,7 @@ public static class WidgetLayout
             w.X = Math.Clamp((int)Math.Round(w.X * (double)newWidth / oldWidth), 0, newWidth - w.Width);
             w.Y = Math.Clamp((int)Math.Round(w.Y * (double)newHeight / oldHeight), 0, newHeight - w.Height);
             w.FontSize = Math.Clamp(w.FontSize * Math.Min((float)newWidth / oldWidth, (float)newHeight / oldHeight), 6, 120);
+            if (IsRadial(w.Kind)) w.GaugeThickness = Math.Clamp(w.GaugeThickness * Math.Min((float)newWidth / oldWidth, (float)newHeight / oldHeight), 1, Math.Min(60, Math.Min(w.Width, w.Height) / 3f));
         }
     }
     public static (int Width, int Height) Canvas(DisplaySettings settings, int width, int height) => settings.Rotation is 90 or 270 ? (height, width) : (width, height);
@@ -71,10 +114,20 @@ public static class WidgetLayout
             if (!double.IsFinite(w.GaugeMinimum) || !double.IsFinite(w.GaugeMaximum) || w.GaugeMaximum <= w.GaugeMinimum ||
                 !float.IsFinite(w.GaugeThickness) || w.GaugeThickness is < 1 or > 60 ||
                 !float.IsFinite(w.GaugeStartAngle) || w.GaugeStartAngle is < -360 or > 360 ||
-                !float.IsFinite(w.GaugeSweepAngle) || w.GaugeSweepAngle is < 1 or > 360 || !IsColor(w.GaugeTrackColor))
-                throw new ArgumentException($"{w.Name}: invalid radial gauge range, thickness, angle or track color.");
-            if (w.Kind == WidgetKind.RadialGauge && (w.GaugeThickness > Math.Min(w.Width, w.Height) / 3f || w.Source is WidgetSource.Text or WidgetSource.Clock or WidgetSource.Date))
-                throw new ArgumentException($"{w.Name}: a radial gauge needs a numeric source and enough room for its thickness.");
+                !float.IsFinite(w.GaugeSweepAngle) || w.GaugeSweepAngle is < 1 or > 360 || !IsColor(w.GaugeTrackColor) || !IsColor(w.GaugeTextColor, true))
+                throw new ArgumentException($"{w.Name}: invalid gauge range, thickness, angle or track color.");
+            if (w.GaugeSegments is < 4 or > 80) throw new ArgumentException($"{w.Name}: use 4–80 gauge segments.");
+            if ((IsGauge(w.Kind) || IsGraph(w.Kind)) && !IsNumeric(w.Source))
+                throw new ArgumentException($"{w.Name}: gauges and graphs need a numeric sensor source.");
+            if (w.GraphMinutes is < 1 or > 60 || !float.IsFinite(w.GraphLineWidth) || w.GraphLineWidth is < 1 or > 6)
+                throw new ArgumentException($"{w.Name}: graph history must be 1–60 minutes; line width 1–6 px.");
+            if (w.LogLines is < 1 or > 10 || w.LogFilePath is null || w.LogFilePath.Length > 500 || w.LogFilePath.Any(char.IsControl))
+                throw new ArgumentException($"{w.Name}: log lines must be 1–10; use a short local file path.");
+            if (!Enum.IsDefined(w.LogDisplay) || w.LogStaleSeconds is < 15 or > 600) throw new ArgumentException($"{w.Name}: invalid log display mode or stale interval (15–600 seconds).");
+            if (w.Source == WidgetSource.TextFileLog && w.LogFilePath.Length > 0 && !BoundedLogTail.IsLocalPath(w.LogFilePath))
+                throw new ArgumentException($"{w.Name}: select an absolute local log path, not a network/device path.");
+            if (IsRadial(w.Kind) && w.GaugeThickness > Math.Min(w.Width, w.Height) / 3f)
+                throw new ArgumentException($"{w.Name}: reduce the radial gauge thickness or enlarge the widget.");
             if (w.TextTemplate is null || w.TextTemplate.Length > 256 || w.ValueFormat is null || w.ValueFormat.Length > 64)
                 throw new ArgumentException($"{w.Name}: text/format is too long.");
             try
@@ -88,19 +141,51 @@ public static class WidgetLayout
     public static string Format(LcdWidget w, Telemetry t)
     {
         if (w.Source == WidgetSource.Text) return w.TextTemplate;
+        if (LogWidget.IsLog(w.Source))
+        {
+            string text = t.LogExcerpts.TryGetValue(LogWidget.Key(w), out var excerpt)
+                ? LogPresentation.Format(w, excerpt, t.Time)
+                : "Waiting for log";
+            return w.TextTemplate.Replace("{value}", text, StringComparison.Ordinal);
+        }
+        if (w.Source is WidgetSource.TopCpuProcess or WidgetSource.TopGpuProcess)
+        {
+            var process = w.Source == WidgetSource.TopCpuProcess ? t.TopCpuProcess : t.TopGpuProcess;
+            return w.TextTemplate.Replace("{value}", process?.Summary ?? "—", StringComparison.Ordinal);
+        }
         double? value = NumericValue(w, t);
         string formatted = w.Source is WidgetSource.Clock or WidgetSource.Date ? t.Time.LocalDateTime.ToString(w.ValueFormat, CultureInfo.InvariantCulture)
             : value.HasValue && double.IsFinite(value.Value) ? value.Value.ToString(w.ValueFormat, CultureInfo.InvariantCulture) : "—";
-        return w.TextTemplate.Replace("{value}", formatted, StringComparison.Ordinal);
+        string coverage = w.Source switch { WidgetSource.CpuPowerAverageHour => t.CpuPowerHour.Coverage, WidgetSource.GpuPowerAverageHour => t.GpuPowerHour.Coverage, WidgetSource.EstimatedTotalPowerAverageHour => t.TotalPowerHour.Coverage,
+            WidgetSource.CpuEnergyTodayKwh => new PowerAverage(null, t.EnergyToday.CpuSeconds).Coverage, WidgetSource.GpuEnergyTodayKwh => new PowerAverage(null, t.EnergyToday.GpuSeconds).Coverage,
+            WidgetSource.EstimatedTotalEnergyTodayKwh => new PowerAverage(null, t.EnergyToday.TotalSeconds).Coverage,
+            WidgetSource.CpuEnergyLast24hKwh => new PowerAverage(null, t.Energy24h.CpuSeconds).Coverage,
+            WidgetSource.GpuEnergyLast24hKwh => new PowerAverage(null, t.Energy24h.GpuSeconds).Coverage,
+            WidgetSource.EstimatedTotalEnergyLast24hKwh => new PowerAverage(null, t.Energy24h.TotalSeconds).Coverage, _ => "" };
+        return w.TextTemplate.Replace("{value}", formatted, StringComparison.Ordinal).Replace("{coverage}", coverage, StringComparison.Ordinal);
     }
-    public static double? NumericValue(LcdWidget w, Telemetry t) => w.Source switch
+    public static double? NumericValue(LcdWidget w, Telemetry t) => NumericValue(w.Source, t, w.Port);
+    public static double? NumericValue(WidgetSource source, Telemetry t, int port = 1) => source switch
         {
             WidgetSource.CpuTemperature => t.CpuTemperature, WidgetSource.GpuTemperature => t.GpuTemperature,
             WidgetSource.CpuMaximumTemperature => t.CpuMaximumTemperature,
             WidgetSource.GpuHotSpotTemperature => t.GpuHotSpotTemperature, WidgetSource.GpuMemoryTemperature => t.GpuMemoryTemperature,
             WidgetSource.CpuLoad => t.CpuLoad, WidgetSource.GpuLoad => t.GpuLoad, WidgetSource.MemoryUsedPercent => t.MemoryUsedPercent,
-            WidgetSource.FanRpm => t.Fans.FirstOrDefault(f => f.Port == w.Port)?.Rpm,
-            WidgetSource.FanDuty => t.Fans.FirstOrDefault(f => f.Port == w.Port)?.Duty, _ => null
+            WidgetSource.GpuVramUsedGiB => t.GpuVramUsedGiB, WidgetSource.GpuVramTotalGiB => t.GpuVramTotalGiB, WidgetSource.GpuVramUsedPercent => t.GpuVramUsedPercent,
+            WidgetSource.GpuSharedMemoryUsedGiB => t.GpuSharedMemoryUsedGiB, WidgetSource.GpuSharedMemoryTotalGiB => t.GpuSharedMemoryTotalGiB,
+            WidgetSource.CpuClockAverageMhz => t.CpuClockAverageMhz, WidgetSource.CpuClockMaximumMhz => t.CpuClockMaximumMhz,
+            WidgetSource.GpuCoreClockMhz => t.GpuCoreClockMhz, WidgetSource.GpuMemoryClockMhz => t.GpuMemoryClockMhz,
+            WidgetSource.CpuPowerWatts => t.CpuPowerWatts, WidgetSource.GpuPowerWatts => t.GpuPowerWatts,
+            WidgetSource.EstimatedTotalPowerWatts => t.EstimatedTotalPowerWatts,
+            WidgetSource.CpuPowerAverageHour => t.CpuPowerHour.Watts, WidgetSource.GpuPowerAverageHour => t.GpuPowerHour.Watts,
+            WidgetSource.EstimatedTotalPowerAverageHour => t.TotalPowerHour.Watts,
+            WidgetSource.CpuEnergyTodayKwh => t.EnergyToday.CpuKwh, WidgetSource.GpuEnergyTodayKwh => t.EnergyToday.GpuKwh, WidgetSource.EstimatedTotalEnergyTodayKwh => t.EnergyToday.TotalKwh,
+            WidgetSource.CpuEnergy24hProjection => t.CpuPowerHour.Watts * 24 / 1000, WidgetSource.GpuEnergy24hProjection => t.GpuPowerHour.Watts * 24 / 1000,
+            WidgetSource.EstimatedTotalEnergy24hProjection => t.TotalPowerHour.Watts * 24 / 1000,
+            WidgetSource.CpuEnergyLast24hKwh => t.Energy24h.CpuKwh, WidgetSource.GpuEnergyLast24hKwh => t.Energy24h.GpuKwh,
+            WidgetSource.EstimatedTotalEnergyLast24hKwh => t.Energy24h.TotalKwh,
+            WidgetSource.FanRpm => t.Fans.FirstOrDefault(f => f.Port == port)?.Rpm,
+            WidgetSource.FanDuty => t.Fans.FirstOrDefault(f => f.Port == port)?.Duty, _ => null
         };
     public static double? GaugeFraction(LcdWidget w, Telemetry t)
     {

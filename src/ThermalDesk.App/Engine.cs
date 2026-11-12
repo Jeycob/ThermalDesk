@@ -25,15 +25,32 @@ internal sealed class Engine
     private CancellationTokenSource? stop;
     private Task[] tasks = [];
     private Telemetry latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
+    private ProcessActivity activity = ProcessActivity.Disabled;
+    private IReadOnlyDictionary<string, LogExcerpt> excerpts = LogExcerpt.Empty;
+    private sealed record Merged(Telemetry Sensor, ProcessActivity Activity, IReadOnlyDictionary<string, LogExcerpt> Logs, Telemetry Value);
+    private Merged? merged;
+    private readonly ConcurrentQueue<string> processLog = new();
+    public string[] ProcessLogs => processLog.ToArray();
     private readonly ConcurrentQueue<string> log = new();
     private volatile bool conflictingController;
     private Settings current = new();
     private volatile bool controllerFault;
     public bool ControllerFault => controllerFault;
-    public Telemetry Latest => Volatile.Read(ref latest);
+    public Telemetry Latest
+    {
+        get
+        {
+            var t = Volatile.Read(ref latest); var a = Volatile.Read(ref activity);
+            var logs = Volatile.Read(ref excerpts); var cached = Volatile.Read(ref merged);
+            if (cached is not null && ReferenceEquals(cached.Sensor, t) && ReferenceEquals(cached.Activity, a) && ReferenceEquals(cached.Logs, logs)) return cached.Value;
+            var value = t with { TopCpuProcess = a.Cpu, TopGpuProcess = a.Gpu, ProcessSampleTime = a.Time, ProcessMonitorStatus = a.Status, LogExcerpts = logs };
+            Volatile.Write(ref merged, new(t, a, logs, value)); return value;
+        }
+    }
     public ConcurrentDictionary<string, string> Status { get; } = new();
     public ConcurrentDictionary<int, FanReading> Fans { get; } = new();
     public ConcurrentDictionary<int, FanControlState> FanCommands { get; } = new();
+    internal ConcurrentDictionary<string, int> FrameRenderCounts { get; } = new();
     internal static int SensorInterval(Settings settings) => settings.CoolingEnabled ? Math.Min(settings.PollSeconds, 2) : settings.PollSeconds;
     public string[] Logs => log.ToArray();
     public bool Running => stop is not null;
@@ -60,38 +77,58 @@ internal sealed class Engine
         if (live) settings.ValidateLiveSelection();
         if (live && settings.CoolingEnabled && testTelemetry is null && !StartupManager.Elevated)
             throw new InvalidOperationException("CPU sensor access on this PC requires administrator rights. Restart as administrator before enabling cooling.");
-        if (live && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
+        if (live && settings.HasUsbSelection && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
         var s = settings.Copy(); Volatile.Write(ref current, s); stop = new(); var token = stop.Token; Live = live; conflictingController = false; controllerFault = false;
-        Status.Clear(); Fans.Clear(); FanCommands.Clear();
+        Status.Clear(); Fans.Clear(); FanCommands.Clear(); FrameRenderCounts.Clear();
         latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
+        activity = ProcessActivity.Disabled; processLog.Clear();
+        Volatile.Write(ref excerpts, LogExcerpt.Empty); Volatile.Write(ref merged, null);
         Status["Session"] = live ? "LIVE · configured devices only" : "PREVIEW · no hardware access";
         Status["TOUGHLIQUID AX"] = s.Aio.Enabled ? "Enabled · waiting for connection" : "Disabled · enable in Displays";
         Status["480×128 panel"] = s.Panel.Enabled ? "Enabled · waiting for connection" : "Disabled · enable in Displays";
         Note(live ? "Live session started. No flash writes or firmware updates." : "Preview started. All values are simulated.");
-        var workers = new List<Task> { Task.Run(() => SensorLoop(SensorInterval(s), live, token)) };
+        if (!live && s.StartLiveAtSignIn && !s.HasLiveSelection)
+        {
+            Status["Session"] = "PREVIEW · all live devices disabled · sign-in preference retained";
+            Note("Live sign-in preference retained, but no live devices are selected. Opened in Preview without hardware access; enable a device before starting live control.");
+        }
+        var workers = new List<Task> { Task.Run(() => SensorLoop(live, token)) };
         if (live)
         {
-            if (s.Panel.Enabled) workers.Add(Task.Run(() => LcdLoop("480×128 panel", s.Panel, true, s.PollSeconds, token)));
-            if (s.Aio.Enabled) workers.Add(Task.Run(() => LcdLoop("TOUGHLIQUID AX", s.Aio, false, s.PollSeconds, token)));
-            if (s.CoolingEnabled || s.RgbEnabled || s.MonitorFanController) workers.Add(Task.Run(() => FanLoop(s, token)));
+            // Disabled workers wait without opening hardware. Each LCD can be enabled,
+            // disabled or reconfigured without releasing the fan controller.
+            workers.Add(Task.Run(() => LcdLoop("480×128 panel", true, token)));
+            workers.Add(Task.Run(() => LcdLoop("TOUGHLIQUID AX", false, token)));
+            workers.Add(Task.Run(() => FanLoop(s, token)));
+            // Process enumeration/PDH must never run on the cooling sensor loop.
+            // Mock hardware checks never enumerate the host's real processes.
+            if (testTelemetry is null) { workers.Add(Task.Run(() => ProcessLoop(token))); workers.Add(Task.Run(() => LogLoop(token))); workers.Add(Task.Run(() => DailyEnergyLoop(token))); }
         }
         tasks = workers.ToArray();
     }
-    public void ApplyLiveSettings(Settings settings)
+    public void ValidateLiveSettings(Settings settings)
     {
         if (!Running || !Live || Cancelled || ControllerFault) throw new InvalidOperationException("No healthy live session. Stop and resolve the fault before reconnecting.");
-        settings.ValidateLiveSelection();
+        // An existing session may become idle when its last RGB/LCD output is
+        // disabled. Keep the shared controller open, clear selected LEDs once,
+        // and never reconnect it merely to apply an OFF request. Only Start
+        // requires at least one selected live device.
+        settings.Validate();
         var before = Volatile.Read(ref current); var next = settings.Copy();
+        if (!before.HasUsbSelection && next.HasUsbSelection && conflicts().Length > 0)
+            throw new InvalidOperationException("Close conflicting controllers before enabling a USB output. Monitoring-only can remain active.");
         bool SamePorts() => before.Ports.All(p =>
         {
             var other = next.Ports.Single(x => x.Port == p.Port);
             return p.Role == other.Role && (p.Mode == ControlMode.Preserve) == (other.Mode == ControlMode.Preserve);
         });
-        if (before.ControllerSerial != next.ControllerSerial || before.CoolingEnabled != next.CoolingEnabled || before.RgbEnabled != next.RgbEnabled ||
-            before.MonitorFanController != next.MonitorFanController || before.PollSeconds != next.PollSeconds || !SamePorts() ||
-            before.Aio.Enabled != next.Aio.Enabled || before.Panel.Enabled != next.Panel.Enabled ||
-            before.Aio.Brightness != next.Aio.Brightness || before.Panel.Brightness != next.Panel.Brightness)
-            throw new InvalidOperationException("Changing devices, managed ports/wiring, polling or LCD brightness requires Stop first. Curve, RGB and widget edits can be applied without restarting fans.");
+        if (before.ControllerSerial != next.ControllerSerial || before.CoolingEnabled != next.CoolingEnabled || !SamePorts())
+            throw new InvalidOperationException("Changing the fan controller, cooling ownership or port wiring requires Stop first. Curves, RGB, sensor polling and LCD edits apply automatically without restarting fans.");
+    }
+    public void ApplyLiveSettings(Settings settings)
+    {
+        ValidateLiveSettings(settings);
+        var next = settings.Copy();
         Volatile.Write(ref current, next);
         Note("Live settings applied in place. Controller was not reinitialized; fan safety history retained.");
     }
@@ -107,33 +144,40 @@ internal sealed class Engine
         catch (Exception e) { Note("Worker exited with error during stop: " + e.Message); }
         stop.Dispose(); stop = null; tasks = []; Live = false;
         FanCommands.Clear(); Fans.Clear();
+        activity = ProcessActivity.Disabled; processLog.Clear();
+        Volatile.Write(ref excerpts, LogExcerpt.Empty); Volatile.Write(ref merged, null);
         Volatile.Write(ref latest, Latest with { Fans = [] });
         foreach (var key in Status.Keys.Where(k => k.StartsWith("Port ", StringComparison.Ordinal))) Status[key] = "Released · no live command / feedback";
         if (!controllerFault && Status.ContainsKey("Controller")) Status["Controller"] = "Released · no live controller feedback";
         Status["Session"] = "Stopped"; Note("Stopped. Captured fan duties requested back, except a real critical-temperature override. Restoration is not BIOS hand-back or a guaranteed hardware watchdog.");
     }
-    private async Task SensorLoop(int seconds, bool live, CancellationToken token)
+    private async Task SensorLoop(bool live, CancellationToken token)
     {
         Monitoring? monitor = null;
+        var history = new TelemetryHistory(live && testTelemetry is null ? DailyEnergyStore.Load() : null,
+            restoredRollingEnergy: live && testTelemetry is null ? RollingEnergyStore.Load() : null);
         try
         {
             while (!token.IsCancellationRequested)
             {
+                int seconds = SensorInterval(Volatile.Read(ref current));
                 try
                 {
                     if (live)
                     {
-                        conflictingController = conflicts().Length > 0;
+                        conflictingController = Volatile.Read(ref current).HasUsbSelection && conflicts().Length > 0;
                         if (conflictingController) { stop?.Cancel(); Note("Conflicting controller detected; cancelling live control."); }
                         Telemetry reading;
                         if (testTelemetry is not null) reading = testTelemetry();
                         else { monitor ??= new(); reading = monitor.Read(Volatile.Read(ref current).PreferredGpuId); }
-                        Volatile.Write(ref latest, reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray() });
+                        Volatile.Write(ref latest, history.Add(reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray() }, Volatile.Read(ref current)));
                     }
                     else
                     {
                         double x = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 20d;
-                        Volatile.Write(ref latest, new(DateTimeOffset.UtcNow, 48 + Math.Sin(x) * 5, 42 + Math.Cos(x) * 4, 12, 8, 31, "Simulated preview"));
+                        var preview = new Telemetry(DateTimeOffset.UtcNow, 48 + Math.Sin(x) * 5, 42 + Math.Cos(x) * 4, 12, 8, 31, "Simulated preview")
+                        { CpuPowerWatts = 50 + Math.Sin(x) * 10, GpuPowerWatts = 35 + Math.Cos(x) * 12 };
+                        Volatile.Write(ref latest, history.Add(preview, Volatile.Read(ref current)));
                     }
                     SetStatus("Sensors", (Latest.Warning.Length == 0 ? "CPU / GPU / RAM · shared sampler" : Latest.Warning) + $" · {seconds} s interval");
                 }
@@ -148,6 +192,81 @@ internal sealed class Engine
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         finally { monitor?.Dispose(); }
     }
+    private async Task DailyEnergyLoop(CancellationToken token)
+    {
+        void Save()
+        {
+            try { var latest = Latest; DailyEnergyStore.Save(latest.EnergyToday); RollingEnergyStore.Save(latest.Energy24h); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { SetStatus("Daily energy", "Persistence unavailable · " + e.GetType().Name); }
+        }
+        try { while (!token.IsCancellationRequested) { await Task.Delay(TimeSpan.FromMinutes(1), token); Save(); } }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        finally { Save(); }
+    }
+    private async Task ProcessLoop(CancellationToken token)
+    {
+        ProcessActivityMonitor? monitor = null; long sampled = 0; string lastKey = "";
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var s = Volatile.Read(ref current);
+                if (!s.ProcessMonitorEnabled && !LogWidget.NeedsProcesses(s))
+                {
+                    monitor?.Dispose(); monitor = null; sampled = 0; lastKey = "";
+                    Volatile.Write(ref activity, ProcessActivity.Disabled); processLog.Clear();
+                }
+                else if (sampled == 0 || Stopwatch.GetElapsedTime(sampled).TotalSeconds >= s.ProcessSampleSeconds)
+                {
+                    sampled = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        monitor ??= new(); var next = monitor.Read(); Volatile.Write(ref activity, next);
+                        string key = $"{next.Cpu?.Pid}:{Math.Round(next.Cpu?.Percent ?? 0)}|{next.Gpu?.Pid}:{Math.Round(next.Gpu?.Percent ?? 0)}|{next.Status}";
+                        if (key != lastKey)
+                        {
+                            processLog.Enqueue($"{next.Time.LocalDateTime:HH:mm:ss} CPU {next.Cpu?.Summary ?? "—"} | GPU {next.Gpu?.Summary ?? "—"}");
+                            while (processLog.Count > 20) processLog.TryDequeue(out _);
+                            lastKey = key;
+                        }
+                    }
+                    catch (Exception e) when (e is not OutOfMemoryException and not AccessViolationException)
+                    { Volatile.Write(ref activity, new ProcessActivity(DateTimeOffset.UtcNow, null, null, "Process sample unavailable · " + e.GetType().Name)); }
+                }
+                await Task.Delay(1000, token);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        finally { monitor?.Dispose(); Volatile.Write(ref activity, ProcessActivity.Disabled); }
+    }
+    private async Task LogLoop(CancellationToken token)
+    {
+        ProcessLogSampler? sampler = null; long sampled = 0; Settings? previous = null;
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var settings = Volatile.Read(ref current);
+                if (!LogWidget.Selected(settings).Any())
+                { sampler = null; sampled = 0; Volatile.Write(ref excerpts, LogExcerpt.Empty); }
+                else if (!ReferenceEquals(previous, settings) || sampled == 0 || Stopwatch.GetElapsedTime(sampled).TotalSeconds >= settings.LogSampleSeconds)
+                {
+                    sampler ??= new(); sampled = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        var value = sampler.Read(settings, Latest); Volatile.Write(ref excerpts, value);
+                        SetStatus("Log widgets", string.Join(" · ", value.Values.Select(v => v.Path.Length == 0 ? v.Status : v.Status + " · " + v.Path)));
+                    }
+                    catch (Exception e) when (e is not OutOfMemoryException and not AccessViolationException)
+                    { Volatile.Write(ref excerpts, LogExcerpt.Empty); SetStatus("Log widgets", "Unavailable · " + e.GetType().Name); }
+                }
+                previous = settings;
+                await Task.Delay(1000, token);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        finally { Volatile.Write(ref excerpts, LogExcerpt.Empty); }
+    }
     private void Guard(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
@@ -157,25 +276,47 @@ internal sealed class Engine
             throw new IOException("Another hardware controller started. Session cancelled to avoid conflicting writes.");
         }
     }
-    private async Task LcdLoop(string name, DisplaySettings settings, bool panel, int seconds, CancellationToken token)
+    private async Task LcdLoop(string name, bool panel, CancellationToken token)
     {
         using var renderer = new FrameRenderer();
         try
         {
             while (!token.IsCancellationRequested)
             {
+                var requested = Volatile.Read(ref current);
+                var settings = panel ? requested.Panel : requested.Aio;
+                if (!settings.Enabled)
+                {
+                    SetStatus(name, "Disabled · layout remains editable offline");
+                    await Task.Delay(250, token);
+                    continue;
+                }
                 ILcd? lcd = null;
                 bool releaseFailed = false;
+                bool reconfigured = false;
                 try
                 {
                     Guard(token); lcd = openDisplay(panel, settings.Brightness);
                     SetStatus(name, "Connected · " + settings.Content);
+                    byte[]? encoded = null; string? previousKey = null; DisplaySettings? previousDisplay = null;
                     while (!token.IsCancellationRequested)
                     {
                         Guard(token);
                         var active = Volatile.Read(ref current); var display = panel ? active.Panel : active.Aio;
-                        using var image = renderer.Render(Latest, display, 480, panel ? 128 : 480);
-                        lcd.Send(FrameRenderer.Jpeg(image)); lcd.Heartbeat();
+                        if (!display.Enabled || display.Brightness != settings.Brightness)
+                        {
+                            reconfigured = true;
+                            break;
+                        }
+                        var telemetry = Latest with { Time = DateTimeOffset.Now };
+                        string? key = FrameRenderer.VisualKey(telemetry, display);
+                        if (encoded is null || key is null || key != previousKey || !ReferenceEquals(previousDisplay, display))
+                        {
+                            using var image = renderer.Render(telemetry, display, 480, panel ? 128 : 480);
+                            encoded = renderer.Encode(image); previousKey = key; previousDisplay = display;
+                            FrameRenderCounts.AddOrUpdate(name, 1, (_, count) => count + 1);
+                        }
+                        lcd.Send(encoded); lcd.Heartbeat();
                         // Heartbeats stay at <= 2 s even when sensor polling is slower.
                         await Task.Delay(TimeSpan.FromSeconds(1d / display.FramesPerSecond), token);
                     }
@@ -192,6 +333,7 @@ internal sealed class Engine
                     }
                 }
                 if (releaseFailed) return;
+                if (reconfigured) continue;
                 await Task.Delay(displayRetryDelay, token);
             }
         }
@@ -209,6 +351,12 @@ internal sealed class Engine
                 bool controllerAttempted = false;
                 try
                 {
+                    while (true)
+                    {
+                        Guard(token); s = Volatile.Read(ref current);
+                        if (s.CoolingEnabled || s.RgbEnabled && s.Ports.Any(Lighting.IsManaged) || s.MonitorFanController) break;
+                        await Task.Delay(250, token);
+                    }
                     // Drivers can publish an initial timestamp before temperatures are ready.
                     // Wait BEFORE opening USB. This is not a reconnect or a full-speed fallback.
                     var startupWait = Stopwatch.StartNew();
@@ -246,6 +394,19 @@ internal sealed class Engine
                         Guard(token);
                         s = Volatile.Read(ref current);
                         monitored = s.Ports.Where(p => s.CoolingEnabled && p.Mode != ControlMode.Preserve).ToArray();
+                        // Turning lighting off is explicit user intent. Send black once;
+                        // do not close/reinitialize the shared cooling controller.
+                        foreach (var disabled in lastLighting.Keys.Where(port => !s.RgbEnabled || !s.Ports.Any(p => p.Port == port && Lighting.IsManaged(p))).ToArray())
+                        {
+                            controller.SetRgbFrame(disabled, new LedColor[lastLighting[disabled].Length]);
+                            lastLighting.Remove(disabled);
+                            SetStatus($"RGB port {disabled}", "Released · last output cleared; no continuing lighting writes");
+                        }
+                        // Explicit OFF owns lighting only; it does not imply RPM
+                        // monitoring. Dark ports are still included in the
+                        // managed lighting frame loop below.
+                        foreach (var stalePort in Fans.Keys.Where(port => !s.Ports.Any(p => p.Port == port && (s.MonitorFanController || monitored.Any(m => m.Port == port) || s.RgbEnabled && p.Rgb))).ToArray())
+                            Fans.TryRemove(stalePort, out _);
                         // Apply thermal decisions before any slower RPM queries or lighting transfers.
                         if (clock.Elapsed.TotalSeconds >= nextControl)
                         {
@@ -275,11 +436,12 @@ internal sealed class Engine
                         if (s.RgbEnabled && clock.Elapsed.TotalSeconds >= nextLight)
                         {
                             double elapsed = clock.Elapsed.TotalSeconds; bool keepalive = elapsed - lastKeepalive >= 2;
-                            foreach (var p in s.Ports.Where(p => p.Rgb))
+                            foreach (var p in s.Ports.Where(Lighting.IsManaged))
                             {
-                                var colors = Lighting.Frame(p, s.RgbColor, elapsed, Latest);
+                                var colors = Lighting.OutputFrame(p, s.RgbColor, elapsed, Latest);
                                 if (keepalive || !lastLighting.TryGetValue(p.Port, out var previous) || !previous.SequenceEqual(colors))
                                 { controller.SetRgbFrame(p.Port, colors); lastLighting[p.Port] = colors; }
+                                SetStatus($"RGB port {p.Port}", p.Rgb ? $"ON · {p.RgbEffect} · {p.RgbBrightness}% · {p.LedCount} LEDs (commanded)" : "OFF · black output (commanded)");
                             }
                             if (keepalive) lastKeepalive = elapsed; nextLight = elapsed + .2;
                         }

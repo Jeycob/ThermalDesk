@@ -9,9 +9,29 @@ internal static class StartupManager
 {
     private const string TaskName = "ThermalDesk-AtSignIn";
     private static readonly string TaskTool = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "schtasks.exe");
+    internal static bool ShouldRequestElevation(string[] arguments, bool alreadyElevated)
+    {
+        // Offline software checks stay usable in unprivileged CI. These exact
+        // two-argument modes return before loading any live hardware profile.
+        bool offline = arguments.Length == 2 && arguments[0] is "--widget-check" or "--benchmark-display-loops" or "--render-preview" or "--benchmark-preview";
+        return !alreadyElevated && !offline;
+    }
+    internal static ProcessStartInfo ElevationStartInfo(string executable, string[] arguments)
+    {
+        if (!Path.IsPathFullyQualified(executable)) throw new ArgumentException("An absolute application path is required.");
+        var info = new ProcessStartInfo(executable) { UseShellExecute = true, Verb = "runas", WorkingDirectory = Path.GetDirectoryName(executable)! };
+        foreach (var argument in arguments) info.ArgumentList.Add(argument);
+        return info;
+    }
     internal static bool ShouldStartLive(Settings settings, string[] arguments, bool shiftHeld, bool profileRecovered = false) =>
-        !shiftHeld && !profileRecovered && (arguments.Contains("--live-once") || settings.StartLiveAtSignIn && arguments.Contains("--startup"));
-    internal static bool ShouldStartMinimized(string[] arguments, bool profileRecovered) => arguments.Contains("--minimized") && !profileRecovered;
+        settings.HasLiveSelection && !shiftHeld && !profileRecovered && !arguments.Contains("--preview") &&
+        (arguments.Contains("--live-once") || (arguments.Contains("--startup") ? settings.StartLiveAtSignIn :
+            !arguments.Contains("--minimized") && (settings.ResumeLastProfileOnLaunch ?? settings.StartLiveAtSignIn)));
+    internal static bool ShouldStartMinimized(Settings settings, string[] arguments, bool profileRecovered, bool shiftHeld = false) =>
+        !profileRecovered && !shiftHeld && !arguments.Contains("--show-window") &&
+        (settings.MinimizeAfterStartup ?? arguments.Contains("--minimized"));
+    internal static bool ShouldHideOnClose(bool enabled, CloseReason reason, bool exiting) =>
+        enabled && reason == CloseReason.UserClosing && !exiting;
     internal static void WaitForPrevious(string[] arguments)
     {
         int index = Array.IndexOf(arguments, "--wait-for-process");
@@ -49,7 +69,7 @@ internal static class StartupManager
             if (task.Exit != 0) throw new IOException("Could not register startup task: " + task.Output);
         }
         using var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
-        if (live) key.DeleteValue("ThermalDesk", false); else key.SetValue("ThermalDesk", $"\"{Application.ExecutablePath}\" --minimized");
+        if (live) key.DeleteValue("ThermalDesk", false); else key.SetValue("ThermalDesk", $"\"{Application.ExecutablePath}\" --startup --preview --minimized");
     }
     public static void Remove()
     {

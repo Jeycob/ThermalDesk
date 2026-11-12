@@ -21,7 +21,7 @@ internal sealed class RgbPreview(Func<PortSettings> read, Func<Telemetry> teleme
         try
         {
             var p = read();
-            if (!p.Rgb) { e.Graphics.DrawString("RGB disabled · no lighting writes", font, Brushes.Silver, 5, 9); return; }
+            if (!p.Rgb) { e.Graphics.DrawString(p.RgbOffRequested ? "RGB OFF · black output requested in Live mode" : "RGB unchanged · not controlled by this port", font, Brushes.Silver, 5, 9); return; }
             var colors = Lighting.Frame(p, fallback, clock.Elapsed.TotalSeconds, telemetry());
             e.Graphics.DrawString($"Planned RGB · {p.RgbEffect} · {colors.Length} LEDs · not hardware feedback", font, Brushes.Silver, 5, 0);
             float width = Math.Max(1, (ClientSize.Width - 10f) / colors.Length);

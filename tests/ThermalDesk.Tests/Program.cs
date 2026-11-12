@@ -175,7 +175,8 @@ lightPort.RgbPeriodSeconds = 0; Throws(() => Lighting.Frame(lightPort, "FFFFFF",
 Throws(() => Protocols.RgbFrame(0, [new(1, 2, 3)]), "RGB port zero rejected");
 settings = new(); settings.Ports[0].RgbPeriodSeconds = double.NaN; Throws(settings.Validate, "NaN RGB profile rejected");
 settings = new(); settings.Ports[0].RgbColor = "GGGGGG"; Throws(settings.Validate, "invalid RGB profile color rejected");
-settings = new(); settings.StartLiveAtSignIn = true; Throws(settings.Validate, "auto live cannot arm an empty profile");
+settings = new(); settings.StartLiveAtSignIn = true; settings.Validate(); Check(true, "idle profile preserves startup intent");
+Throws(settings.ValidateLiveSelection, "empty profile cannot start hardware control");
 settings.Aio.Enabled = true; settings.Validate(); Check(true, "explicit saved LCD startup profile validates without enabling fans");
 var portCopy = settings.Ports[0].Copy(); portCopy.RgbEffect = RgbEffect.RainbowWave; portCopy.Curve[0] = new(20, 30); Check(settings.Ports[0].Curve[0].Temperature == 30 && settings.Ports[0].RgbEffect == RgbEffect.Static, "port editor works on independent data");
 var backlog = new Queue<byte[]>();
@@ -217,12 +218,12 @@ gauge.GaugeThickness = float.NaN; Throws(() => WidgetLayout.Validate(gaugeDispla
 var sensorDevices = new HardwareSnapshot[]
 {
     new("cpu", "Ryzen", DeviceCategory.Cpu, [new("Core (Tctl/Tdie)", SensorMetric.Temperature, 60), new("CPU CCD1 (Tdie)", SensorMetric.Temperature, 90), new("Distance to TjMax", SensorMetric.Temperature, 100), new("CPU Total", SensorMetric.Load, 12), new("CPU Core #1", SensorMetric.Load, 98)]),
-    new("igpu", "Integrated AMD", DeviceCategory.AmdGpu, [new("GPU Core", SensorMetric.Temperature, 94), new("GPU Hot Spot", SensorMetric.Temperature, 110), new("GPU Memory", SensorMetric.Temperature, 105), new("GPU Core", SensorMetric.Load, 88)]),
+    new("igpu", "Integrated AMD", DeviceCategory.AmdGpu, [new("GPU Core", SensorMetric.Temperature, 94), new("GPU Hot Spot", SensorMetric.Temperature, 110), new("GPU Memory", SensorMetric.Temperature, 105), new("GPU Core", SensorMetric.Load, 88)]) { AdapterKind = GpuAdapterKind.Integrated },
     new("rtx", "NVIDIA RTX 4080", DeviceCategory.NvidiaGpu, [new("GPU Core", SensorMetric.Temperature, 43), new("GPU Hot Spot", SensorMetric.Temperature, 72), new("GPU Memory Junction", SensorMetric.Temperature, 82), new("GPU Core", SensorMetric.Load, 20), new("GPU Memory Controller", SensorMetric.Load, 99)]),
     new("ram", "RAM", DeviceCategory.Memory, [new("Memory", SensorMetric.Load, 35), new("Virtual Memory", SensorMetric.Load, 90)])
 };
 var sensorProjected = SensorProjection.Project(sensorDevices, now);
-Check(sensorProjected.GpuDeviceId == "rtx" && sensorProjected.GpuDeviceName.Contains("4080"), "automatic GPU chooses NVIDIA, not hotter integrated graphics");
+Check(sensorProjected.GpuDeviceId == "rtx" && sensorProjected.GpuDeviceName.Contains("4080"), "automatic GPU chooses a non-integrated adapter, not hotter integrated graphics");
 Check(sensorProjected.GpuTemperature == 43 && sensorProjected.GpuLoad == 20, "GPU core temperature and load stay on the selected device");
 Check(sensorProjected.GpuHotSpotTemperature == 72 && sensorProjected.GpuMemoryTemperature == 82, "hotspot and VRAM are not borrowed from a different GPU");
 Check(sensorProjected.CpuTemperature == 60 && sensorProjected.CpuTemperatureSource == "Core (Tctl/Tdie)", "CPU package is named explicitly rather than hottest unnamed sensor");
@@ -242,7 +243,7 @@ Check(!FanSafety.IsCritical(sensorNoCore with { CpuMaximumTemperature = 60 }, no
 var sensorInvalid = SensorProjection.Project([new("cpu", "CPU", DeviceCategory.Cpu, [new("CPU Package", SensorMetric.Temperature, 0), new("CPU Total", SensorMetric.Load, 101)]), new("gpu", "GPU", DeviceCategory.NvidiaGpu, [new("GPU Core", SensorMetric.Temperature, double.NaN), new("GPU Core", SensorMetric.Load, -1)])], now);
 Check(sensorInvalid.CpuTemperature is null && sensorInvalid.GpuTemperature is null && sensorInvalid.CpuLoad is null && sensorInvalid.GpuLoad is null, "sentinel temperatures and out-of-range loads are unavailable");
 Check(sensorInvalid.Warning.Contains("Missing data alone never forces 100%"), "missing-sensor explanation distinguishes data loss from genuinely critical heat");
-Check(SensorProjection.Project(sensorDevices.Where(d => d.Category != DeviceCategory.NvidiaGpu).ToArray(), now).GpuDeviceId == "igpu", "automatic can use AMD when no NVIDIA device exists");
+Check(SensorProjection.Project(sensorDevices.Where(d => d.Category != DeviceCategory.NvidiaGpu).ToArray(), now).GpuDeviceId == "igpu", "automatic uses the only available adapter regardless of vendor");
 Check(WidgetLayout.NumericValue(new LcdWidget { Source = WidgetSource.CpuMaximumTemperature }, sensorProjected) == 90, "maximum CPU sensor can be selected as an LCD widget");
 Check(!FanSafety.IsCritical(Tele() with { CpuMaximumTemperature = 150 }, now), "implausible maximum CPU sentinel cannot synthesize critical duty");
 settings = new(); settings.PreferredGpuId = "rtx"; Check(settings.Copy().PreferredGpuId == "rtx", "preferred GPU survives profile copy");
@@ -322,4 +323,46 @@ foreach (var shape in new[] { (Width: 480, Height: 480), (Width: 480, Height: 12
 }
 foreach (var shape in new[] { (480, 480), (480, 128), (128, 480) })
     Check(WidgetLayout.Defaults(shape.Item1, shape.Item2).Where(w => w.Source is WidgetSource.CpuTemperature or WidgetSource.GpuTemperature).All(w => w.TextTemplate.Contains("°C")), "every default temperature widget explicitly identifies Celsius in every orientation");
+foreach (var shape in new[] { (Width: 480, Height: 128), (Width: 480, Height: 480) })
+{
+    var presets = LcdPresets.Available(shape.Width, shape.Height);
+    Check(presets.Select(p => p.Id).Distinct().Count() == presets.Count, "preset IDs are unique per display");
+    Check(presets.Count == (shape.Height == 128 ? 12 : 6), "display has orientation-specific thermal, AI, gaming and power template choices");
+    foreach (var preset in presets)
+    foreach (int rotation in new[] { 0, 90, 180, 270 })
+    {
+        var original = new DisplaySettings { Enabled = true, Rotation = rotation, Brightness = 43, FramesPerSecond = 3, MediaPath = "keep-my-media.png", Content = DisplayContent.Image };
+        original.Widgets = WidgetLayout.Defaults(WidgetLayout.Canvas(original, shape.Width, shape.Height).Width, WidgetLayout.Canvas(original, shape.Width, shape.Height).Height);
+        string before = System.Text.Json.JsonSerializer.Serialize(original, Settings.JsonOptions);
+        var candidate = LcdPresets.Create(original, preset.Id, shape.Width, shape.Height);
+        WidgetLayout.Validate(candidate, shape.Width, shape.Height);
+        int expected = shape.Width == shape.Height || (rotation is 90 or 270) == preset.Portrait ? rotation : preset.Portrait ? 90 : 0;
+        Check(candidate.Rotation == expected, "preset supplies mounting orientation and preserves matching inverted orientation");
+        Check(candidate.Enabled && candidate.Brightness == 43 && candidate.FramesPerSecond == 3 && candidate.MediaPath == "keep-my-media.png", "preset preserves device enable, brightness, frame rate and media selection");
+        Check(candidate.Content == DisplayContent.Dashboard && candidate.UseCustomLayout && candidate.Overlay, "preset produces an editable visible dashboard");
+        Check(before == System.Text.Json.JsonSerializer.Serialize(original, Settings.JsonOptions), "preview does not modify the source profile");
+        var second = LcdPresets.Create(original, preset.Id, shape.Width, shape.Height);
+        Check(!candidate.Widgets.Select(w => w.Id).Intersect(second.Widgets.Select(w => w.Id)).Any(), "separate template instances have independent widget IDs");
+        candidate.Widgets[0].TextTemplate = "Edited";
+        Check(second.Widgets[0].TextTemplate != "Edited", "template instances do not share editable widgets");
+    }
+    Throws(() => LcdPresets.Create(new(), "not-a-preset", shape.Width, shape.Height), "unknown preset is rejected");
+}
+Throws(() => LcdPresets.Available(128, 480), "use physical, not rotated, display dimensions for the catalog");
+Throws(() => LcdPresets.Create(new DisplaySettings { Rotation = 45 }, "round-clock", 480, 480), "preset rejects an unsupported mounting angle");
+WidgetSourceGaugeTests.Run(Check);
+RgbIntentTests.Run(Check);
+ProfileImportTests.Run(Check);
+ProcessActivityTests.Run(Check);
+LogExcerptTests.Run(Check);
+UniversalTelemetryTests.Run(Check);
+LogMetricsTests.Run(Check);
+PowerAndGraphTests.Run(Check);
+DailyEnergyTests.Run(Check);
+RollingEnergyTests.Run(Check);
+if (args.Length == 1)
+{
+    var supplied = SettingsStore.LoadForImport(Path.GetFullPath(args[0]), false);
+    Check(supplied.Ports.Count == 5 && !supplied.StartLiveAtSignIn, "supplied recovery profile validates without enabling automatic live startup");
+}
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");

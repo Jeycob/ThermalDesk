@@ -18,7 +18,39 @@ internal static class HardwareChecks
         int exit = 0;
         try
         {
-            if (mode == "--sensor-check")
+            if (mode == "--log-check")
+            {
+                using var monitor = new ProcessActivityMonitor(); monitor.Read(); Thread.Sleep(5000);
+                var activity = monitor.Read(); var sampler = new ProcessLogSampler();
+                var settings = new Settings(); settings.Panel.Enabled = settings.Panel.UseCustomLayout = true;
+                settings.Panel.Widgets = [new() { Source = WidgetSource.TopCpuProcessLog }, new() { Source = WidgetSource.TopGpuProcessLog }];
+                var telemetry = new Telemetry(DateTimeOffset.UtcNow, null, null, null, null, null) { TopCpuProcess = activity.Cpu, TopGpuProcess = activity.Gpu };
+                var samples = sampler.Read(settings, telemetry);
+                report["activity"] = activity;
+                report["logMetadataOnly"] = samples.Select(pair => new
+                {
+                    source = pair.Key, pair.Value.Path, pair.Value.Status, characters = pair.Value.Text.Length,
+                    pair.Value.IsAiLog, pair.Value.WrittenTime, metrics = pair.Value.Metrics,
+                    aiSummary = pair.Value.IsAiLog || pair.Value.Metrics.HasAiRates ? LogPresentation.Format(new LcdWidget
+                    { Source = WidgetSource.TopGpuProcessLog, LogDisplay = LogDisplayMode.AiStats, Width = 319, Height = 89, FontSize = 18, LogLines = 3 }, pair.Value, DateTimeOffset.UtcNow) : null
+                }).ToArray();
+                report["fileReads"] = sampler.FileReads; report["discoveryAttempts"] = sampler.DiscoveryAttempts;
+                report["usbOpened"] = false; report["processesModified"] = false; report["logContentsExported"] = false;
+            }
+            else if (mode == "--process-check")
+            {
+                using var monitor = new ProcessActivityMonitor(); using var process = System.Diagnostics.Process.GetCurrentProcess();
+                var readings = new List<ProcessActivity>(); var samples = new List<object>();
+                for (int i = 0; i < 4; i++)
+                {
+                    var watch = System.Diagnostics.Stopwatch.StartNew(); readings.Add(monitor.Read()); watch.Stop(); process.Refresh();
+                    samples.Add(new { milliseconds = watch.Elapsed.TotalMilliseconds, handles = process.HandleCount, memoryMiB = process.WorkingSet64 / 1048576d });
+                    if (i < 3) Thread.Sleep(5000);
+                }
+                report["readings"] = readings; report["resourceSamples"] = samples;
+                report["usbOpened"] = false; report["processesModified"] = false;
+            }
+            else if (mode == "--sensor-check")
             {
                 using var monitor = new Monitoring();
                 var readings = new List<Telemetry>();

@@ -1,0 +1,11 @@
+ThermalDesk setup
+
+Before an update: in the existing ThermalDesk choose Stop, then Exit from its tray icon. Setup refuses to replace a running controller; it never stops fans or starts TT RGB Plus.
+
+ThermalDesk installs to a stable Program Files folder with a Start menu shortcut. Your saved profile in %LOCALAPPDATA%\ThermalDesk is preserved. Uninstalling also preserves the profile.
+
+Existing sign-in entries are updated to the new application path, without enabling startup or changing their saved live-start settings. If no startup entry exists, startup remains disabled. Setup does not start live control, install drivers or change firmware.
+
+Open ThermalDesk from Start after installation. Manual launches request administrator access for sensor/device access and open in Preview. Review your profile before starting live control.
+
+This community build is not code-signed. Only install packages you built yourself or downloaded from the project's trusted release. Do not disable Windows security features to install it.

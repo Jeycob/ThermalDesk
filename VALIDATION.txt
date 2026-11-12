@@ -291,3 +291,313 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   total CPU across16 logical processors,60.5..64.0 MiB working set,15 threads,
   GDI3 and USER7 constant. Mock decode/hash overhead included; no claim about
   real USB throughput, hardware driver load or long-duration leak freedom.
+
+0.3.11 SOFTWARE-ONLY LIVE EDITING / UI FOLLOW-UP
+- Startup popup ownership fixed: WinForms dispatches Closed before an item's
+  Click; disposing the popup synchronously in Closed could invalidate the action.
+  Menus now remain owned until replacement/form disposal. Regression dispatches
+  the Closed/Click lifecycle without registering a real startup task or registry.
+- Form/layout/grid buffering and fixed-size session/footer prevent full-layout
+  churn. Stable refresh no longer rewrites the session label. Diagnostic text
+  updates retain selection and scroll; grid combo/checkbox edits commit without
+  requiring focus to leave the cell. No global WS_EX_COMPOSITED workaround.
+- Curves, RGB toggles, controller monitoring and polling update in-place. LCDs
+  have independent dormant workers; enable/disable/brightness affects only that
+  LCD, not the cooling controller or the other LCD. Disabled workers do no USB I/O.
+- RGB off sends one black frame then no continuing lighting writes. Disabling
+  controller monitoring removes outdated feedback. Preserve ports receive no
+  duty writes when RGB/monitoring is enabled from a display-only session.
+- Fan-controller serial, cooling ownership, port wiring and changing which fan
+  ports are managed still require explicit Stop; controller faults remain latched.
+- Native RGB color swatches/picker/presets expose global versus port overrides.
+  PaletteWave has clickable/reorderable 2-8-color palettes and relevant controls.
+  Both LCD widget editors remain accessible offline at the minimum window size.
+- 953 core assertions and214 native UI/mock checks pass. Added actual grid-edit,
+  popup lifecycle, stable-refresh/selection, minimum-size/offline editor, RGB
+  round-trip/viewport and dynamic device lifecycle regressions. Mock cooling stays
+  on one connection at40% through LCD brightness/enable changes; RGB activation
+  from LCD-only opens a controller only on request and sends zero duty writes.
+- 200 repeat renders keep GDI74/74. A local20.25-second mocked two-LCD10FPS run
+  averaged0.433% total CPU across16 logical processors,176/171 frames,
+  61.9..66.4MiB working set. GDI3 throughout; USER7..9 and handles297..302 in
+  this short sample. This does not establish long-duration leak freedom or real
+  hardware timing/performance. No USB, sensor driver, user profile, startup task
+  or live process was accessed or changed by these software-only checks.
+- Fresh target-PC PnP evidence still lists264A:2328 and232B only. No233D chassis
+  LCD is present; physical connectivity and display acceptance remain outstanding.
+
+0.3.12 ADMINISTRATOR STARTUP / LCD ENUMERATION DIAGNOSIS
+- Normal GUI launch requests Windows runas/UAC consent before loading a saved
+  profile or creating the application UI. Cancellation or launch failure exits;
+  it does not fall back to limited-access or implicit live control.
+- Elevation preserves the executable arguments and adds no hidden --startup or
+  --live-once flag. Armed saved sign-in profiles do not make a manual launch live.
+  Existing Highest interactive sign-in tasks are not rewritten by this change.
+- Exact two-argument software mock/render/benchmark modes remain unprivileged.
+  Pure regression tests inspect elevation decisions and ProcessStartInfo only;
+  they do not display UAC prompts, register tasks or start a second real process.
+- Deep target-PC enumeration identified historical233D composite/MI00/MI01
+  entries, not a guessed panel ID. The historical panel and failed unknown USB
+  node share the exact physical ACPI(POTI)/USBport17 location and parent. The
+  healthy fan controller and AX LCD are separately behind USBhubport15(POTH).
+- One authorized exact-leaf pnputil restart succeeded as an OS operation but
+  did not recover the LCD: configuration-descriptor Code43 became a device-
+  descriptor failure. No parent hub, fan controller, driver or reboot was reset.
+  Existing live fan feedback followed its normal thermal curve42-46%, ending
+  at42%; no forced100% or cancelled fan session was observed. No direct fan/RGB
+  commands were issued by the diagnostic script. Profile/PID were unchanged.
+- After the operator's LCD-only physical replug, one standard hardware-change
+  scan completed and the same port again showed configuration-descriptor Code43;
+  the actual233D LCD/HID interfaces remain absent. The panel is enabled in the
+  live profile and its independent worker retries; no second handle was opened.
+  Known-good data cable/direct LCD USB-port recovery and physical image acceptance
+  remain required; no made-up protocol can repair an unreadable USB descriptor.
+- Local953 core assertions and224 native UI/mock checks pass;200 repeat renders
+  retain GDI74/74. Ten new startup-policy tests exercise normal/elevated/offline
+  decisions, exact runas argument preservation and absence of hidden live flags.
+
+2026-11-12 RECTANGULAR LCD RECOVERY / PHYSICAL ACCEPTANCE
+- Supersedes the earlier missing-device and outstanding-image status above.
+- One authorized removal of the exact failed LCD USB leaf and ordinary device
+  scan removed its Code43 entry. No driver deletion, subtree operation, parent
+  hub reset, fan/RGB command, vendor SDK execution or reboot was performed.
+- After the operator reconnected only the LCD's own cable, Windows enumerated
+  264A:233D with both HID interfaces healthy. MI00 input/output441; MI01 input17,
+  output1025. Read-only --diagnose confirmed the expected descriptors; the current
+  application, settings and healthy cooling devices remained unchanged.
+- The operator then confirmed that the physical rectangular LCD displayed
+  ThermalDesk data instead of the Thermaltake logo. No new protocol commands or
+  alternate USB IDs were necessary. This is physical image acceptance, not a
+  long-duration reliability or unattended-cooling certification.
+- Evidence: work/windows-audit-20261112/ThermalDesk-LcdRemoveFailedLeafOnce.json,
+  ThermalDesk-LcdRecoveredDescriptors.json and the operator's chat confirmation.
+
+0.3.13 LCD LAYOUT PRESETS
+- Six rectangular templates (three landscape and three portrait) and three
+  round templates. Presets are fresh editable widget copies, never fan settings
+  or commands. Preview/cancel does not mutate the original profile or enable an
+  LCD. Acceptance synchronizes orientation without double-reframing widgets.
+- Physical native resolution is retained for all four rotations. Portrait
+  design canvases are128x480, with90/270-degree mounting. Matching inverted
+  orientation, brightness, FPS and device enable settings are preserved.
+- Core tests cover template validation, rotation, source isolation, unique IDs,
+  invalid template rejection and device-control preservation. Native mock tests
+  cover UI acceptance, decoded JPEG dimensions and text fitting at100-degree/
+  percent readings. All nine layout previews are visually inspected offline.
+- No running target hardware session is restarted by these software tests.
+
+0.3.14 EXTENDED WIDGETS / RGB INTENT / WINDOWS INSTALLER
+- Seven new sources: dedicated GPU VRAM used/total/percent, CPU average/max
+  sampled core clocks, GPU core/memory clocks. Projection stays on the selected
+  GPU; missing readings stay unavailable. Pinned LibreHardwareMonitor 0.9.6
+  SmallData MiB is converted once to GiB. Reported clocks are not effective clocks.
+- Seven gauge kinds including the existing arc: horizontal/vertical bars, arc,
+  segmented dial, needle, full ring and semicircle. Tests cover all four rotations,
+  native JPEG dimensions, missing/zero/half/full readings and readable text.
+  Friendly choices, descriptions and corrected dark PropertyGrid selection.
+- Explicit per-port RGB OFF persists and has bounded black keepalive. Legacy
+  unselected RGB remains unmanaged. Turning off the global master clears prior
+  managed ports once. Mock tests prove ON/OFF/LED count/global-master transitions
+  retain one controller and issue zero duty writes in RGB-only mode.
+- The last output can be disabled live, even with an armed startup preference.
+  A saved idle profile is valid and starts in Preview at sign-in. Direct empty
+  live start still fails. No automatic controller reset or full-speed fallback.
+- Hover help added to ports, curve controls, LED count, modes and main settings.
+  Silent/Custom/Full and editable curves remain; Apply changes accepts editor
+  changes without Stop/Start. Existing live fan/profile settings are not rewritten.
+- 1,247 core assertions, 661 native UI/render/mock checks and 41 installer startup
+  migration assertions pass. 200 repeated renders retain GDI handles 76/76.
+  Local 20.37-second mocked two-LCD run (10 FPS requested each): 0.321% total
+  CPU across 16 logical processors, 179 frames per display, 62.6-65.1 MiB RAM,
+  297-301 handles and GDI 3 throughout the sample. This is not a long-term leak
+  guarantee, target-PC benchmark or physical timing/colour acceptance test.
+- EXE installer uses stable Program Files directory and custom Start/tray icon.
+  It refuses running ThermalDesk, preserves profiles, never starts Live itself,
+  and migrates only recognized same-user startup entries with XML backup/rollback.
+  Uninstall aborts before file removal if startup cleanup fails. Unit/isolated
+  packaging tests do not replace a real upgrade/uninstall test on a spare PC.
+  Application/installer are unsigned. Official compiler signature was verified.
+- Corsair CMH64GX5M2B6200C32 family support researched; ThermalDesk has no RAM RGB
+  backend in this release. No OpenRGB/SMBus scan or RAM lighting write performed.
+2026-11-12 / 0.3.15 profile import repair
+- Core import/backup tests: 1260 assertions plus a separately supplied recovery
+  profile validation (1261 with the supplied snapshot-derived JSON).
+- Native UI/mock checks: 675. No hardware transports opened.
+- Regression: a pending UI autosave no longer overwrites an imported profile;
+  both LCD editors, portrait coordinates, GPU selection, curve/RGB-only fields
+  and subsequent edits stay consistent with the saved import.
+- Compatible Live imports reuse the mock connection; ownership-changing imports
+  fail before modifying saved settings or controls. No real fan-speed test run.
+- Import has a strict profile-file check, keeps dated independent backups and
+  preserves local startup intent. It does not silently launch hardware.
+- Recovery on Sklenik is limited to curves/RGB and LCD enable flags captured
+  from the running 0.3.13 snapshot; current display layouts are retained. This
+  is not claimed to be a byte-identical copy of the original 0.3.13 profile.
+
+2026-11-12 / 0.3.16 window preferences and optional process activity
+- Core: 1272 hardware-independent assertions passed.
+- Native UI/render/mock controller: 700 checks passed; GDI object count stable.
+- Real X/Close hides instead of stopping an active mock Live session when opted
+  in. Tray Open restores it; tray Exit actually closes. Shutdown is not hidden.
+- Explicit unchecked minimize preference overrides old --minimized task flags;
+  recovery, Shift and --show-window stay visible. Choices persist in profiles.
+- Process monitoring is opt-in and Live-only, with its own worker (5-60 seconds),
+  bounded 20-entry in-memory history, disposed native PDH query and process handles.
+- CPU delta normalization, PID reuse, GPU busiest-engine ranking, unavailable
+  values and text widget formatting covered by deterministic tests.
+- Local read-only 4-sample process check: no USB/controller access or process
+  modifications; warm reads approximately 10-18 ms, handles 229-231. Local
+  sandbox could not read many protected processes; target-PC check is separate.
+- Startup installer migration regression: 41 assertions passed.
+
+2026-11-12 / 0.3.17 bounded log widgets and lower allocation/render overhead
+- Core: 1292 assertions passed. Native UI/render/mock: 727 checks passed.
+  GDI objects 78 -> 78 across 200 repeated renders; installer migration 41 passed.
+- Manual local file / top CPU process log / top GPU process log text sources,
+  one-click Add widget entries, path picker and 1-10 line selection on either LCD.
+- Logs read only in Live, on an independent worker, at 5-60 second intervals.
+  Input at most 32768 bytes/file; output at most 10 short lines / 4096 chars.
+  Native files shared for write/delete, no persistent file handles or subprocess.
+  UTF-8 / UTF-16 LE / BE, huge lines, append, truncation, file replacement,
+  missing files, credentials/ANSI, disabled displays and PID reuse tested.
+- Candidate discovery cached 60 seconds per process identity; no recursive walk:
+  max 6 related directories and 384 entries. Unknown/protected/console-only
+  processes may have no candidate; manual path remains the precise option.
+- Common password/token patterns masked, not a complete privacy guarantee.
+  Log text is excluded from JSON telemetry diagnostic/status exports.
+- Reuse serializer metadata, composite telemetry, bounded font cache, JPEG encoder
+  buffer and unchanged dashboard JPEGs. No extra bitmap clone. Old image media
+  released on mode switch; animated media has a decoded-pixel budget.
+- Hardware frame transfers/heartbeats, fan readiness, critical thresholds, sensor
+  cadence, conflict detection and live curve semantics are unchanged. No hardware
+  benchmark, real fan write, forced GC or working-set trim was used for this check.
+- Local same-host 20-second injected LCD benchmark (16 logical processors):
+  0.3.16 mean total CPU 0.2458%, 62.6-65.3 MiB working set, 177/172 frames.
+  0.3.17 mean total CPU 0.1360%, 54.4-59.0 MiB working set, 182/178 frames;
+  21 actual renders per display, reused JPEGs otherwise, 1.12 MiB managed
+  allocation after 5-second warmup. Handles 302-304, GDI 3 -> 3.
+  Approximately 45% less measured CPU in this short synthetic workload; not
+  a guaranteed reduction for the target PC, real USB, images, screen capture,
+  live sensors or every profile. New clocks use wall-clock seconds independently
+  of sensor sampling. Raw reports are in work/thermaldesk-0.3.17-checks.
+
+2026-11-12 / 0.3.18 vendor-neutral monitoring and compact AI/game log views
+- Core: 1589 hardware-independent assertions passed. Native UI/render/mock:
+  924 checks passed; GDI objects 79 -> 79 across 200 repeated renders.
+  Startup migration: 41 assertions passed; automatic Live intent unchanged.
+- Intel/AMD CPU x Intel/AMD/NVIDIA GPU projection fixtures; native and D3D
+  dedicated memory, separate shared RAM, explicit GPU core aliases, busiest
+  3D/compute engine fallback (not copy engines or sums), nominal core clocks.
+  Automatic GPU ranking is vendor-neutral and locked for a monitoring session;
+  device disappearance stays unavailable. Explicit pins remain supported.
+- Hardware read failures are isolated per device; Windows whole-PC CPU/physical
+  RAM fallback uses native system counters. GetSystemTimes fallback is skipped
+  on multiple processor groups rather than reporting a partial >64-thread load.
+  No invented temperatures, driver installation or motherboard/RAM control.
+- Monitoring-only mode is explicit and can sample without any USB device. Mock
+  checks prove another vendor controller does not block read-only monitoring,
+  but does block switching to USB control. Thermal thresholds are unchanged.
+- AI log modes distinguish last generation from prompt tokens/s and explicitly
+  reported context. Gaming extracts explicit FPS/frame time/network RTT or a
+  per-process PresentMon CSV. Presentation cadence and PC latency are labeled
+  separately; neither is described as network ping. Mixed-process CSV rejected.
+  Stale game-file data is marked OLD; absent metrics remain missing.
+- Six additional compact templates: AI/Gaming x landscape/portrait/round.
+  Native PNG checks include populated values, font auto-fit and no clipping;
+  actual fitted multiline bounds measured, not merely requested font size.
+  Profiles preserve old source enum values and default to legacy Tail mode.
+- CSV header + tail stay within the 32 KiB input budget. Separate bounded log
+  polling/caches from 0.3.17 remain. No game injection, PresentMon installation,
+  ETW capture, internet probe, network server or hardware-control test started.
+- Fixture tests do not certify physical Intel Arc, AMD GPUs or every CPU model.
+  This release has not changed live fan/RGB/LCD state during these local checks.
+  Reports and rendered examples: work/thermaldesk-0.3.18-checks.
+- Reported CPU package and selected GPU total/package watts, never TDP/load
+  estimates or overlapping core+package sums. Separate explicitly estimated
+  whole-PC watts with editable overhead and PSU efficiency; missing required
+  sensors stay absent. Known integrated GPU excluded from package double-count.
+- Time-weighted rolling-hour power averages over valid sampled intervals,
+  explicit coverage, missing/long gaps excluded, exact oldest-interval clipping.
+  GPU/calibration changes and backward clock reset history. Session-only RAM
+  history is capped at 724 samples and five-second minimum spacing, and excluded
+  from JSON telemetry exports. No extra sensor polling/driver/process added.
+- Line and bar graph kinds with 1-60 minute windows, automatic/fixed Y range,
+  labels, colors and thickness. Pixel buckets retain peaks; gaps break lines.
+  Separate fan-port histories. Three additional power/graph templates verified
+  at native landscape/portrait/round resolutions with populated readings.
+- Local three-graph synthetic render cost: 200 frames x 721 history points,
+  454.75 ms total / 2.274 ms per frame; 10.12 MiB managed allocation total,
+  GDI resources 28 -> 27. This is render-only, not actual USB or sensor timing.
+
+2026-11-12 / 0.3.19 daily energy consumption
+- Core: 1604 assertions passed. Native UI/render/mock: 940 checks passed;
+  GDI resources 80 -> 79 over 200 repeated renders. Startup migration: 41 passed.
+- Separate CPU/GPU/estimated whole-PC kWh today from trapezoidal integration of
+  valid observed power intervals. Missing/offline/long gaps are excluded, never
+  silently counted as zero. Each total exposes its own duration of coverage.
+- Local calendar-day reset, midnight interval clipping, UTC elapsed time across
+  spring/fall DST, corrupt state, backward clock/identity changes tested.
+- Separate 24h projection = available last-hour average W x 24 / 1000, not the
+  accumulated daily total. Six appended sources keep old profile enum values.
+- Tiny same-day checkpoint is atomically saved every minute/on normal Stop
+  by a separate worker, not the cooling loop. Restoring never bridges downtime.
+  Crash may lose roughly one minute. Preview/mock checks do not touch the real
+  ledger. Invalid/oversized state safely ignored; checkpoint round-trip tested.
+- No fan/LCD/RGB control command, driver installation or live restart performed
+  for this release. Existing hardware safety policy is unchanged.
+
+2026-11-12 / 0.3.20 observed rolling energy and AI log summaries
+- Core: 1627 assertions passed. Native UI/render/mock: 957 checks passed;
+  200 repeated renders, GDI resources 78 -> 78. Startup migration: 41 passed.
+- Rolling last-24h CPU/GPU/approximate whole-PC kWh integrates observed power
+  intervals, rather than multiplying the last-hour average by 24. Separate
+  coverage, bounded 1441 UTC-minute buckets, persisted across restarts. Missing
+  time is excluded. The oldest partial minute is prorated; whole-PC watts are
+  still sensor/calibration estimates, not wall-meter measurements.
+- Tested 25h expiry, restart gaps, missing endpoints, calibration changes,
+  clock rollback, minute splitting, invalid checkpoints and profile migration.
+  Legacy projected widgets upgrade at load; editor no longer offers projections.
+- Existing top-GPU Tail widget now displays compact AI metrics for recognized
+  backend logs. Prefer LM backend timings; parse before 10-line display clipping.
+  Last inference metrics survive noisy appends; original timestamps/byte offsets
+  prevent unrelated writes making stale reports fresh. Truncation/PID changes
+  invalidate cached metrics. RawTail explicitly preserves raw text mode.
+- Exact current 319x89 px / 18px / 3-line widget rendered and measured without
+  clipping. LAST/OLD GEN, prompt tok/s, context and age fit. No live throughput
+  is invented; rates are last reported completed inferences.
+- Existing 128x45 px energy widget uses two lines; total and coverage measured
+  at its saved 12px bold font without clipping. Other layout settings unchanged.
+- All local checks use synthetic telemetry/mock USB. No fan/RGB/LCD command or
+  live control started during build/tests. Native reports/PNGs:
+  work/thermaldesk-0320-log-checks-final.
+
+2026-11-12 / 0.3.21 saved-profile resume and simpler UI
+- Core: 1627 assertions passed in three fresh sequential processes. Native
+  UI/render/mock: 973 checks passed; no hardware access, GDI resources 78 -> 78
+  over 200 renders. Startup/installer contract: 44 checks passed without changing
+  any live startup tasks or registry entries.
+- Manual launch can resume the saved configured profile after explicit opt-in.
+  Legacy profiles already armed for Live sign-in inherit this behavior; new
+  profiles are not armed. Separate Windows sign-in choice remains independent.
+- Shift, --preview, recovered profiles and no selected live outputs bypass
+  automatic control. A known startup controller conflict falls back to Preview
+  without opening hardware. Imports retain this PC's auto-resume preference.
+- Explicit Preview registry/postinstall arguments prevent manual resume from
+  changing a Preview sign-in or installer launch into Live. Old --minimized-only
+  Preview entries remain Preview and migrate to explicit mode arguments.
+- Readable startup explanations/status and optional Save now. Unchanged labels
+  are not rewritten; hidden UI timer changes from 1s to 5s. Control polling and
+  fan/thermal safety rules are unchanged. Thread/handle footer queries are opt-in,
+  sampled with the other resource counters every 5s instead of 3s.
+- Log metric regexes now use linear NonBacktracking matching with the SAME 30ms
+  timeout and 32KiB input cap. This avoids the old compiled-matcher cold-JIT
+  timeout seen during first fixture parsing; expected metric assertions remain
+  unchanged and missing/timeout data still stays unavailable.
+- Local 35s simulated two-preview UI benchmark: mean 0.2044% total CPU on 16
+  logical processors; working set 72.7-79.7MiB; handles 371-374; GDI 43 and USER
+  56 throughout. This is not live sensor/USB throughput or a long-term leak test.
+- Settings screenshot visually checked. README simplified into setup, profile,
+  controls, widgets and troubleshooting; essential hardware limitations kept.
+- Evidence: work/thermaldesk-0.3.21-checks/final3 and preview-performance.json.
+  No real controller, LCD, RGB, fan, pump, driver or remote process was changed.
+

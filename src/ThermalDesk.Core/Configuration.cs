@@ -17,6 +17,37 @@ public sealed record Telemetry(DateTimeOffset Time, double? CpuTemperature, doub
     public double? GpuHotSpotTemperature { get; init; }
     public double? GpuMemoryTemperature { get; init; }
     public double? CpuMaximumTemperature { get; init; }
+    public double? GpuVramUsedGiB { get; init; }
+    public double? GpuVramTotalGiB { get; init; }
+    public double? GpuVramUsedPercent { get; init; }
+    public double? GpuSharedMemoryUsedGiB { get; init; }
+    public double? GpuSharedMemoryTotalGiB { get; init; }
+    public GpuAdapterKind GpuAdapterKind { get; init; }
+    public string GpuMemorySource { get; init; } = "";
+    public string GpuLoadSource { get; init; } = "";
+    public string CpuDeviceName { get; init; } = "";
+    public string CpuLoadSource { get; init; } = "";
+    public double? CpuClockAverageMhz { get; init; }
+    public double? CpuClockMaximumMhz { get; init; }
+    public double? GpuCoreClockMhz { get; init; }
+    public double? GpuMemoryClockMhz { get; init; }
+    public double? CpuPowerWatts { get; init; }
+    public double? GpuPowerWatts { get; init; }
+    public double? EstimatedTotalPowerWatts { get; init; }
+    public string CpuPowerSource { get; init; } = "";
+    public string GpuPowerSource { get; init; } = "";
+    public string PowerEstimateStatus { get; init; } = "";
+    public PowerAverage CpuPowerHour { get; init; } = PowerAverage.Empty;
+    public PowerAverage GpuPowerHour { get; init; } = PowerAverage.Empty;
+    public PowerAverage TotalPowerHour { get; init; } = PowerAverage.Empty;
+    public DailyEnergyState EnergyToday { get; init; } = DailyEnergyState.Empty;
+    [JsonIgnore] public RollingEnergyState Energy24h { get; init; } = RollingEnergyState.Empty;
+    [JsonIgnore] public HistorySnapshot History { get; init; } = HistorySnapshot.Empty;
+    public ProcessUse? TopCpuProcess { get; init; }
+    public ProcessUse? TopGpuProcess { get; init; }
+    public DateTimeOffset ProcessSampleTime { get; init; }
+    public string ProcessMonitorStatus { get; init; } = "Process monitoring disabled";
+    [JsonIgnore] public IReadOnlyDictionary<string, LogExcerpt> LogExcerpts { get; init; } = LogExcerpt.Empty;
     public IReadOnlyList<FanReading> Fans { get; init; } = [];
     public string CpuTemperatureSource { get; init; } = "";
     public string CpuMaximumTemperatureSource { get; init; } = "";
@@ -27,7 +58,7 @@ public sealed record Telemetry(DateTimeOffset Time, double? CpuTemperature, doub
     public IReadOnlyList<GpuDeviceInfo> GpuDevices { get; init; } = [];
 }
 public sealed record FanReading(int Port, int Rpm, int Duty);
-public sealed record GpuDeviceInfo(string Id, string Name);
+public sealed record GpuDeviceInfo(string Id, string Name) { public GpuAdapterKind Kind { get; init; } }
 
 public sealed class PortSettings
 {
@@ -39,6 +70,9 @@ public sealed class PortSettings
     public int MinimumDuty { get; set; } = 35;
     public int FixedDuty { get; set; } = 70;
     public bool Rgb { get; set; }
+    // Old profiles with Rgb=false mean "leave lighting alone". Only explicit user
+    // OFF requests take ownership of a dark output, including after restarting.
+    public bool RgbOffRequested { get; set; }
     public int LedCount { get; set; } = 12;
     public RgbEffect RgbEffect { get; set; } = RgbEffect.Static;
     public string RgbColor { get; set; } = "";
@@ -96,13 +130,32 @@ public sealed class Settings
     public bool CoolingWiringConfirmed { get; set; }
     public bool RgbEnabled { get; set; }
     public bool MonitorFanController { get; set; }
+    public bool AllowMonitoringOnly { get; set; }
     public string PreferredGpuId { get; set; } = "";
     public bool StartLiveAtSignIn { get; set; }
+    // Older explicitly armed sign-in profiles may resume on manual launch too.
+    // New/unarmed profiles remain Preview until the user opts in.
+    public bool? ResumeLastProfileOnLaunch { get; set; }
+    public bool ShowTechnicalDetails { get; set; }
+    // Null preserves --minimized behavior for profiles from older releases.
+    // Once the user selects either state, that explicit choice wins over old task arguments.
+    public bool? MinimizeAfterStartup { get; set; }
+    public bool MinimizeWhenClosed { get; set; }
+    public bool ProcessMonitorEnabled { get; set; }
+    public int ProcessSampleSeconds { get; set; } = 5;
+    public int LogSampleSeconds { get; set; } = 5;
+    public double PowerEstimateExtraWatts { get; set; } = 40;
+    public double PowerEstimateEfficiencyPercent { get; set; } = 90;
+    public bool PowerEstimateIncludesGpu { get; set; } = true;
     public string RgbColor { get; set; } = "23D6BA";
     public string ControllerSerial { get; set; } = "";
     public DisplaySettings Panel { get; set; } = new();
     public DisplaySettings Aio { get; set; } = new();
     public List<PortSettings> Ports { get; set; } = Enumerable.Range(1, 5).Select(i => new PortSettings { Port = i }).ToList();
+    [JsonIgnore]
+    public bool HasUsbSelection => Panel.Enabled || Aio.Enabled || CoolingEnabled || MonitorFanController ||
+        RgbEnabled && Ports.Any(Lighting.IsManaged);
+    [JsonIgnore] public bool HasLiveSelection => AllowMonitoringOnly || HasUsbSelection;
 
     public void Validate()
     {
@@ -111,11 +164,17 @@ public sealed class Settings
             throw new ArgumentException("Profile contains a null required object or field.");
         if (ControllerSerial.Length > 200 || ControllerSerial.Any(char.IsControl)) throw new ArgumentException("Controller serial must be at most 200 printable characters.");
         if (PollSeconds is < 1 or > 10) throw new ArgumentException("Polling must be 1–10 seconds.");
+        if (ProcessSampleSeconds is < 5 or > 60) throw new ArgumentException("Process sampling must be 5–60 seconds.");
+        if (LogSampleSeconds is < 5 or > 60) throw new ArgumentException("Log sampling must be 5–60 seconds.");
+        if (!double.IsFinite(PowerEstimateExtraWatts) || PowerEstimateExtraWatts is < 0 or > 500 ||
+            !double.IsFinite(PowerEstimateEfficiencyPercent) || PowerEstimateEfficiencyPercent is < 50 or > 100)
+            throw new ArgumentException("Power estimate: extra system load must be 0–500 W; PSU efficiency 50–100%.");
         if (PreferredGpuId is null || PreferredGpuId.Length > 200 || PreferredGpuId.Any(char.IsControl)) throw new ArgumentException("GPU identifier must be at most 200 printable characters.");
         if (Ports.Count != 5 || !Ports.Select(p => p.Port).Order().SequenceEqual(Enumerable.Range(1, 5)))
             throw new ArgumentException("Exactly five distinct controller ports (1–5) are required.");
         if (RgbColor.Length != 6 || !RgbColor.All(Uri.IsHexDigit)) throw new ArgumentException("RGB color must be six hexadecimal digits.");
-        if (RgbEnabled && Ports.All(p => !p.Rgb)) throw new ArgumentException("Select at least one RGB port.");
+        if (RgbEnabled && !Ports.Any(Lighting.IsManaged))
+            throw new ArgumentException("Select at least one RGB port for ON or explicit OFF, or disable the global RGB master.");
         foreach (var p in Ports)
         {
             if (p.Curve is null || p.Curve.Any(x => x is null) || p.CustomCurveBackup is null || p.CustomCurveBackup.Any(x => x is null))
@@ -151,17 +210,19 @@ public sealed class Settings
         WidgetLayout.Validate(Aio, 480, 480);
         if (CoolingEnabled && (!CoolingWiringConfirmed || Ports.All(p => p.Mode == ControlMode.Preserve)))
             throw new ArgumentException("Cooling requires confirmed wiring and at least one configured port.");
-        if (StartLiveAtSignIn && !Panel.Enabled && !Aio.Enabled && !CoolingEnabled && !RgbEnabled && !MonitorFanController)
-            throw new ArgumentException("Select and validate at least one live device before enabling live sign-in startup.");
+        // The saved sign-in preference is independent of the current output
+        // selection. Turning the last output off must remain saveable; startup
+        // falls back to Preview until a live device is selected again.
     }
     public Settings Copy() => JsonSerializer.Deserialize<Settings>(JsonSerializer.Serialize(this, JsonOptions), JsonOptions)!;
     public void ValidateLiveSelection()
     {
         Validate();
-        if (!Panel.Enabled && !Aio.Enabled && !CoolingEnabled && !RgbEnabled && !MonitorFanController)
-            throw new ArgumentException("No live device is selected. Open Displays and enable the correct LCD, or select controller monitoring / RGB / verified cooling ports. Preview alone never opens hardware.");
+        if (!HasLiveSelection)
+            throw new ArgumentException("No Live mode is selected. Enable monitoring-only in Sensors, or select an LCD / controller monitoring / RGB / verified cooling port. Preview never opens hardware.");
     }
-    public static JsonSerializerOptions JsonOptions => new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
+    // Reuse serializer metadata instead of rebuilding it on every copy/save/preview.
+    public static JsonSerializerOptions JsonOptions { get; } = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 }
 
 public sealed record StartupProfile(Settings Settings, bool Recovered, string Warning, string? PreservedPath);
@@ -169,6 +230,32 @@ public sealed record StartupProfile(Settings Settings, bool Recovered, string Wa
 public static class SettingsStore
 {
     public const int MaximumProfileBytes = 1024 * 1024;
+    public static Settings LoadForImport(string path, bool keepLiveAtSignIn, bool? keepResumeOnLaunch = null)
+    {
+        // Unlike first launch, a missing or unrelated file must never become defaults.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (stream.Length > MaximumProfileBytes) throw new InvalidDataException("Profile exceeds the 1 MiB limit.");
+        using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        using var document = JsonDocument.Parse(reader.ReadToEnd());
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !new[] { "SchemaVersion", "Panel", "Aio", "Ports" }.All(name => root.TryGetProperty(name, out _)))
+            throw new InvalidDataException("This is not a ThermalDesk profile. Select an exported profile, settings.json, or settings.json.previous, not a diagnostic report.");
+        var result = root.Deserialize<Settings>(Settings.JsonOptions) ?? throw new InvalidDataException("Empty profile.");
+        WidgetLayout.UpgradeEnergyWidgets(result);
+        result.Validate();
+        // A transferred profile cannot silently enable or disable this PC's startup preference.
+        result.StartLiveAtSignIn = keepLiveAtSignIn;
+        result.ResumeLastProfileOnLaunch = keepResumeOnLaunch;
+        return result;
+    }
+    public static string BackupBeforeImport(string path, Settings current)
+    {
+        string backup = path + ".before-import-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmss") + "-" + Guid.NewGuid().ToString("N") + ".json";
+        if (File.Exists(path)) File.Copy(path, backup, overwrite: false);
+        else Save(backup, current);
+        return backup;
+    }
     public static Settings Load(string path)
     {
         FileStream stream;
@@ -180,6 +267,7 @@ public static class SettingsStore
             if (stream.Length > MaximumProfileBytes) throw new InvalidDataException("Settings exceed the 1 MiB profile limit. Move the original aside before saving a replacement.");
             using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             var s = JsonSerializer.Deserialize<Settings>(reader.ReadToEnd(), Settings.JsonOptions) ?? throw new InvalidDataException("Empty settings file.");
+            WidgetLayout.UpgradeEnergyWidgets(s);
             s.Validate(); return s;
         }
     }
@@ -202,6 +290,7 @@ public static class SettingsStore
             catch (Exception backupError) when (backupError is JsonException or ArgumentException or InvalidDataException or IOException or UnauthorizedAccessException) { }
             // A valid old backup is useful for editing, never authority to rearm hardware.
             recovered.StartLiveAtSignIn = recovered.CoolingEnabled = recovered.RgbEnabled = recovered.MonitorFanController = recovered.CoolingWiringConfirmed = false;
+            recovered.ResumeLastProfileOnLaunch = false;
             recovered.Aio.Enabled = recovered.Panel.Enabled = false;
             string warning = "Saved profile could not be loaded (" + error.GetType().Name + "). " +
                 (previous ? "Previous profile opened in Preview only. " : "Defaults opened in Preview only. ") +

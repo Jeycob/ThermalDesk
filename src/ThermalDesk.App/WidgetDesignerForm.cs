@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Drawing.Design;
+using System.Globalization;
 using ThermalDesk.Core;
 
 namespace ThermalDesk.App;
@@ -16,6 +18,8 @@ internal sealed class WidgetDesignerForm : Form
     private readonly DesignerCanvas canvas;
     private readonly WidgetHistory history;
     private readonly Button undo, redo;
+    private readonly ContextMenuStrip addMenu = new();
+    private readonly ToolTip hints = new() { AutoPopDelay = 18000, InitialDelay = 350, ReshowDelay = 100 };
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     private bool rebinding;
     public DisplaySettings Result => working.Copy();
@@ -35,7 +39,21 @@ internal sealed class WidgetDesignerForm : Form
         var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
         undo = MakeButton("Undo", () => RestoreHistory(false)); redo = MakeButton("Redo", () => RestoreHistory(true));
         tools.Controls.Add(undo); tools.Controls.Add(redo);
-        tools.Controls.Add(MakeButton("Add", Add)); tools.Controls.Add(MakeButton("Duplicate", Duplicate)); tools.Controls.Add(MakeButton("Delete", Delete));
+        var add = MakeButton("Add widget ▾", () => { });
+        foreach (WidgetKind kind in Enum.GetValues<WidgetKind>())
+        {
+            var item = new ToolStripMenuItem(WidgetKindConverter.Label(kind));
+            item.Click += (_, _) => { try { Add(kind); } catch (ArgumentException e) { MessageBox.Show(this, e.Message, "Widget designer", MessageBoxButtons.OK, MessageBoxIcon.Warning); } }; addMenu.Items.Add(item);
+        }
+        addMenu.Items.Add(new ToolStripSeparator());
+        foreach (var source in new[] { WidgetSource.TextFileLog, WidgetSource.TopCpuProcessLog, WidgetSource.TopGpuProcessLog })
+        {
+            var item = new ToolStripMenuItem(WidgetSourceConverter.Label(source));
+            item.Click += (_, _) => AddLog(source); addMenu.Items.Add(item);
+        }
+        add.Click += (_, _) => addMenu.Show(add, new Point(0, add.Height));
+        hints.SetToolTip(add, "Choose Text, a gauge, Line graph or Bar graph. Select its sensor in Content → Source. Graphs use bounded session history in RAM, without extra sensor polling.");
+        tools.Controls.Add(add); tools.Controls.Add(MakeButton("Duplicate", Duplicate)); tools.Controls.Add(MakeButton("Delete", Delete));
         tools.Controls.Add(MakeButton("Back", () => Reorder(-1))); tools.Controls.Add(MakeButton("Front", () => Reorder(1)));
         tools.Controls.Add(MakeButton("Font…", PickFont)); tools.Controls.Add(MakeButton("Canvas color…", PickBackground)); tools.Controls.Add(MakeButton("Defaults", Defaults)); tools.Controls.Add(MakeButton("Export PNG…", Export)); root.Controls.Add(tools, 0, 1);
         var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
@@ -44,7 +62,16 @@ internal sealed class WidgetDesignerForm : Form
         columns.Controls.Add(list, 0, 0);
         canvas = new DesignerCanvas(() => working, () => Selected, telemetry, canvasWidth, canvasHeight, width == height);
         columns.Controls.Add(canvas, 1, 0); columns.Controls.Add(properties, 2, 0);
-        properties.ViewBackColor = Color.FromArgb(22, 34, 48); properties.ViewForeColor = Color.White; properties.HelpBackColor = BackColor; properties.HelpForeColor = Color.White; properties.CategoryForeColor = Color.FromArgb(38, 218, 179);
+        properties.BackColor = properties.ViewBackColor = Color.FromArgb(22, 34, 48);
+        properties.ForeColor = properties.ViewForeColor = Color.White;
+        properties.LineColor = Color.FromArgb(34, 50, 65);
+        properties.CategorySplitterColor = Color.FromArgb(16, 25, 38);
+        properties.CategoryForeColor = Color.FromArgb(38, 218, 179);
+        properties.SelectedItemWithFocusBackColor = Color.FromArgb(32, 89, 111);
+        properties.SelectedItemWithFocusForeColor = Color.White;
+        properties.DisabledItemForeColor = Color.FromArgb(165, 180, 195);
+        properties.ViewBorderColor = properties.HelpBorderColor = Color.FromArgb(52, 72, 91);
+        properties.HelpBackColor = BackColor; properties.HelpForeColor = Color.White;
         var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 }; footer.ColumnStyles.Add(new(SizeType.Percent, 100)); footer.ColumnStyles.Add(new(SizeType.Absolute, 110)); footer.ColumnStyles.Add(new(SizeType.Absolute, 110)); footer.Controls.Add(status, 0, 0);
         footer.Controls.Add(MakeButton("Cancel", () => { DialogResult = DialogResult.Cancel; Close(); }), 1, 0);
         var apply = MakeButton("Apply layout", () => { if (Commit()) { DialogResult = DialogResult.OK; Close(); } }); footer.Controls.Add(apply, 2, 0); root.Controls.Add(footer, 0, 3);
@@ -91,10 +118,49 @@ internal sealed class WidgetDesignerForm : Form
         { RestoreHistory(keys == (Keys.Control | Keys.Y)); return true; }
         return base.ProcessCmdKey(ref message, keys);
     }
-    private void Add()
+    private void Add() => Add(WidgetKind.Text);
+    private void AddLog(WidgetSource source)
+    {
+        string path = "";
+        if (source == WidgetSource.TextFileLog)
+        {
+            using var dialog = new OpenFileDialog { Title = "Select a local log or text file", Filter = "Log / text / PresentMon CSV|*.log;*.txt;*.out;*.err;*.jsonl;*.csv|All files|*.*", CheckFileExists = true };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            path = dialog.FileName;
+        }
+        Add(WidgetKind.Text); var widget = Selected!;
+        new WidgetProperties(widget).Source = source;
+        widget.LogFilePath = path; widget.Width = Math.Min(canvasWidth - 24, 440); widget.Height = Math.Min(canvasHeight - 24, 90);
+        widget.LogDisplay = LogDisplayMode.Auto; widget.LogLines = canvasWidth < 180 ? 6 : 3;
+        widget.X = 12; widget.Y = 12; widget.Alignment = WidgetAlignment.Left;
+        widget.FontFamily = "Consolas"; widget.FontSize = canvasWidth < 240 ? 10 : 14; widget.Bold = false;
+        Commit(); status.Text = "Log widget added · read after Apply layout in Live · path/status in Device state";
+    }
+    private void Add(WidgetKind kind)
     {
         if (working.Widgets.Count >= 40) throw new ArgumentException("Maximum 40 widgets per display.");
         var w = new LcdWidget { Name = "Widget " + (working.Widgets.Count + 1), X = 12, Y = Math.Min(20 + working.Widgets.Count * 10, canvasHeight - 44), Width = Math.Min(220, canvasWidth - 24), Height = 44, FontSize = canvasWidth < 240 ? 18 : 28 };
+        w.Kind = kind;
+        if (WidgetLayout.IsGraph(kind))
+        {
+            w.Name = WidgetKindConverter.Label(kind); w.X = w.Y = 8; w.Width = Math.Min(320, canvasWidth - 16);
+            w.Height = Math.Min(150, canvasHeight - 16); w.FontSize = 11; w.Foreground = "26DAB3";
+        }
+        if (WidgetLayout.IsGauge(kind))
+        {
+            w.Name = WidgetKindConverter.Label(kind) + " " + (working.Widgets.Count + 1);
+            w.Foreground = "26DAB3"; w.GaugeTextColor = "FFFFFF"; w.TextTemplate = "{value} °C";
+            if (WidgetLayout.IsRadial(kind))
+            {
+                w.Width = w.Height = Math.Min(180, Math.Min(canvasWidth, canvasHeight) - 24);
+                w.FontSize = w.Width < 120 ? 18 : 26;
+            }
+            else if (kind == WidgetKind.VerticalGauge)
+            {
+                w.Width = Math.Min(80, canvasWidth - 24); w.Height = Math.Min(200, canvasHeight - 24); w.FontSize = 17;
+            }
+            w.Y = Math.Min(w.Y, canvasHeight - w.Height - 12);
+        }
         working.Widgets.Add(w); Rebind(w.Id); Commit();
     }
     private void Duplicate()
@@ -168,7 +234,7 @@ internal sealed class WidgetDesignerForm : Form
         undo.PerformClick(); Verify(Selected!.X == beforeMove, "Undo restores interrupted drag");
         return assertions;
     }
-    protected override void Dispose(bool disposing) { if (disposing) timer.Dispose(); base.Dispose(disposing); }
+    protected override void Dispose(bool disposing) { if (disposing) { timer.Dispose(); addMenu.Dispose(); hints.Dispose(); } base.Dispose(disposing); }
 }
 
 internal sealed class DesignerCanvas : Control
@@ -258,27 +324,71 @@ internal sealed class DesignerCanvas : Control
 internal sealed class WidgetProperties(LcdWidget widget)
 {
     [Category("1 · Content")] public string Name { get => widget.Name; set => widget.Name = value; }
-    [Category("1 · Content")] public WidgetKind Kind { get => widget.Kind; set => widget.Kind = value; }
-    [Category("1 · Content"), Description("Choose a sensor. Source changes set a matching default unit/label; customize Text afterward.")]
+    [Category("1 · Content"), TypeConverter(typeof(WidgetKindConverter)), Description("Gauges and line/bar history graphs need numeric sensors. Graphs use bounded in-memory session history; configure the window/scale under Graph. Shape changes do not reset your colors or range.")]
+    public WidgetKind Kind { get => widget.Kind; set => widget.Kind = value; }
+    [Category("1 · Content"), TypeConverter(typeof(WidgetSourceConverter)), Description("Choose a sensor. This resets its text, format and gauge range to useful defaults. VRAM is dedicated GPU memory, not shared RAM. Clocks are reported MHz, not effective transfer rate. Missing sensors display a dash, never a fake zero.")]
     public WidgetSource Source
     {
         get => widget.Source;
         set
         {
-            widget.Source = value; widget.ValueFormat = value switch { WidgetSource.Clock => "HH:mm:ss", WidgetSource.Date => "yyyy-MM-dd", WidgetSource.FanRpm or WidgetSource.FanDuty or WidgetSource.CpuLoad or WidgetSource.GpuLoad or WidgetSource.MemoryUsedPercent => "0", _ => "0.0" };
+            if (value is WidgetSource.TopCpuProcess or WidgetSource.TopGpuProcess || LogWidget.IsLog(value)) widget.Kind = WidgetKind.Text;
+            widget.Source = value; widget.ValueFormat = value switch { WidgetSource.Clock => "HH:mm:ss", WidgetSource.Date => "yyyy-MM-dd", WidgetSource.FanRpm or WidgetSource.FanDuty or WidgetSource.CpuLoad or WidgetSource.GpuLoad or WidgetSource.MemoryUsedPercent or WidgetSource.GpuVramUsedPercent or WidgetSource.CpuClockAverageMhz or WidgetSource.CpuClockMaximumMhz or WidgetSource.GpuCoreClockMhz or WidgetSource.GpuMemoryClockMhz => "0", _ => "0.0" };
+            widget.GaugeMinimum = 0;
+            if (value is WidgetSource.CpuEnergyTodayKwh or WidgetSource.GpuEnergyTodayKwh or WidgetSource.EstimatedTotalEnergyTodayKwh or WidgetSource.CpuEnergy24hProjection or WidgetSource.GpuEnergy24hProjection or WidgetSource.EstimatedTotalEnergy24hProjection or WidgetSource.CpuEnergyLast24hKwh or WidgetSource.GpuEnergyLast24hKwh or WidgetSource.EstimatedTotalEnergyLast24hKwh) widget.ValueFormat = "0.000";
+            widget.GaugeMaximum = value switch
+            {
+                WidgetSource.FanRpm => 2500, WidgetSource.GpuVramUsedGiB or WidgetSource.GpuVramTotalGiB => 16,
+                WidgetSource.GpuSharedMemoryUsedGiB or WidgetSource.GpuSharedMemoryTotalGiB => 64,
+                WidgetSource.CpuPowerWatts or WidgetSource.CpuPowerAverageHour => 250,
+                WidgetSource.GpuPowerWatts or WidgetSource.GpuPowerAverageHour => 450,
+                WidgetSource.EstimatedTotalPowerWatts or WidgetSource.EstimatedTotalPowerAverageHour => 800,
+                WidgetSource.CpuEnergyTodayKwh or WidgetSource.GpuEnergyTodayKwh or WidgetSource.EstimatedTotalEnergyTodayKwh or WidgetSource.CpuEnergy24hProjection or WidgetSource.GpuEnergy24hProjection or WidgetSource.EstimatedTotalEnergy24hProjection or WidgetSource.CpuEnergyLast24hKwh or WidgetSource.GpuEnergyLast24hKwh or WidgetSource.EstimatedTotalEnergyLast24hKwh => 10,
+                WidgetSource.CpuClockAverageMhz or WidgetSource.CpuClockMaximumMhz => 6000,
+                WidgetSource.GpuCoreClockMhz => 4000, WidgetSource.GpuMemoryClockMhz => 16000, _ => 100
+            };
             widget.TextTemplate = value switch
             {
                 WidgetSource.CpuTemperature => "CPU {value} °C", WidgetSource.GpuTemperature => "GPU {value} °C",
                 WidgetSource.CpuMaximumTemperature => "CPU MAX {value} °C",
                 WidgetSource.GpuHotSpotTemperature => "GPU HOTSPOT {value} °C", WidgetSource.GpuMemoryTemperature => "GPU MEMORY {value} °C",
                 WidgetSource.CpuLoad => "CPU {value}%", WidgetSource.GpuLoad => "GPU {value}%", WidgetSource.MemoryUsedPercent => "RAM {value}%",
+                WidgetSource.GpuVramUsedGiB => "VRAM {value} GiB", WidgetSource.GpuVramTotalGiB => "VRAM TOTAL {value} GiB", WidgetSource.GpuVramUsedPercent => "VRAM {value}%",
+                WidgetSource.GpuSharedMemoryUsedGiB => "SHARED {value} GiB", WidgetSource.GpuSharedMemoryTotalGiB => "SHARED LIMIT {value} GiB",
+                WidgetSource.CpuClockAverageMhz => "CPU AVG {value} MHz", WidgetSource.CpuClockMaximumMhz => "CPU MAX {value} MHz",
+                WidgetSource.GpuCoreClockMhz => "GPU {value} MHz", WidgetSource.GpuMemoryClockMhz => "GPU MEM {value} MHz",
+                WidgetSource.CpuPowerWatts => "CPU {value} W", WidgetSource.GpuPowerWatts => "GPU {value} W", WidgetSource.EstimatedTotalPowerWatts => "PC EST {value} W",
+                WidgetSource.CpuPowerAverageHour => "CPU AVG {value} W ({coverage})", WidgetSource.GpuPowerAverageHour => "GPU AVG {value} W ({coverage})", WidgetSource.EstimatedTotalPowerAverageHour => "PC EST AVG {value} W ({coverage})",
+                WidgetSource.CpuEnergyTodayKwh => "CPU TODAY {value} kWh /{coverage}", WidgetSource.GpuEnergyTodayKwh => "GPU TODAY {value} kWh /{coverage}", WidgetSource.EstimatedTotalEnergyTodayKwh => "PC EST TODAY {value} kWh /{coverage}",
+                WidgetSource.CpuEnergy24hProjection => "CPU 24h EST {value} kWh", WidgetSource.GpuEnergy24hProjection => "GPU 24h EST {value} kWh", WidgetSource.EstimatedTotalEnergy24hProjection => "PC 24h EST {value} kWh",
+                WidgetSource.CpuEnergyLast24hKwh or WidgetSource.GpuEnergyLast24hKwh or WidgetSource.EstimatedTotalEnergyLast24hKwh => WidgetLayout.RollingEnergyTemplate(value, widget.Width),
+                WidgetSource.TopCpuProcess => "CPU {value}", WidgetSource.TopGpuProcess => "GPU {value}",
+                WidgetSource.TextFileLog or WidgetSource.TopCpuProcessLog or WidgetSource.TopGpuProcessLog => "{value}",
                 WidgetSource.FanRpm => "FAN {value} RPM", WidgetSource.FanDuty => "FAN {value}%", WidgetSource.Clock or WidgetSource.Date => "{value}", _ => widget.TextTemplate
             };
         }
     }
-    [Category("1 · Content"), Description("Literal text with {value} substituted from the selected source. Text source is entirely literal.")] public string Text { get => widget.TextTemplate; set => widget.TextTemplate = value; }
+    [Category("1 · Content"), Description("Literal text with {value} from the selected source. Power averages also support {coverage}: measured duration within the last hour. Keep EST for estimated total power.")] public string Text { get => widget.TextTemplate; set => widget.TextTemplate = value; }
     [Category("1 · Content"), Description("Numeric: 0 or 0.0. Clock: HH:mm:ss. Date: yyyy-MM-dd. No code is evaluated.")] public string ValueFormat { get => widget.ValueFormat; set => widget.ValueFormat = value; }
     [Category("1 · Content"), Description("Controller port 1–5, used only for FanRpm/FanDuty.")] public int FanPort { get => widget.Port; set => widget.Port = value; }
+    [Category("6 · Log file"), Editor(typeof(LogPathEditor), typeof(UITypeEditor)), Description("Local text file source: absolute local path; click … to browse. No network/device paths or symlinks. Reads at most the last 32 KiB, only in Live. Automatic process-log sources ignore this field.")]
+    public string LogFile { get => widget.LogFilePath; set => widget.LogFilePath = value?.Trim() ?? ""; }
+    [Category("6 · Log file"), Description("Last 1–10 lines. Use a small Consolas font and a wide/tall Text widget. Logs may contain private information; common credentials are redacted, not guaranteed anonymous.")]
+    public int LastLines { get => widget.LogLines; set => widget.LogLines = value; }
+    [Category("6 · Log file"), Description("Auto: prioritize recognized AI/game metrics. AiStats: LAST completed generation/prompt tok/s, context and age, not live streaming speed. Tail also upgrades old automatic GPU widgets to AI stats when rates exist. RawTail: always raw latest lines, preserving the end of long lines. Compact: strip prefixes. Gaming: reported FPS/frame time/network RTT or PresentMon CSV cadence. No game injection or server probing.")]
+    public LogDisplayMode LogView { get => widget.LogDisplay; set => widget.LogDisplay = value; }
+    [Category("6 · Log file"), Description("Fit text inside this widget, down to 8 px (or your smaller selected size). Structured views prioritize FPS / generation speed; narrow portrait widgets put labels on separate lines.")]
+    public bool AutoFitLog { get => widget.LogAutoFit; set => widget.LogAutoFit = value; }
+    [Category("6 · Log file"), Description("Mark AI/game observations OLD after 15–600 seconds. AI age follows the inference timestamp, not newer unrelated log lines. LAST / PRES are last observations, not live streaming telemetry. PC LAT is rendering/input latency, never network ping.")]
+    public int StaleAfterSeconds { get => widget.LogStaleSeconds; set => widget.LogStaleSeconds = value; }
+    [Category("7 · Graph"), Description("Visible history window: 1–60 minutes. Session history stays only in RAM, at most one new point per five seconds. Gaps are not filled with zeros.")]
+    public int HistoryMinutes { get => widget.GraphMinutes; set => widget.GraphMinutes = value; }
+    [Category("7 · Graph"), Description("Scale to visible measurements. When false, use Gauge Minimum/Maximum as fixed Y bounds. Bar graphs include a zero baseline when automatic.")]
+    public bool AutoScale { get => widget.GraphAutoScale; set => widget.GraphAutoScale = value; }
+    [Category("7 · Graph"), Description("Show current value/title, Y bounds and time labels when the widget has enough room (at least 80×55 px). Units come from your text template.")]
+    public bool ShowGraphLabels { get => widget.GraphShowLabels; set => widget.GraphShowLabels = value; }
+    [Category("7 · Graph"), Description("Line/bar thickness in design pixels, 1–6. No effect on the sampler or fan control.")]
+    public float LineWidth { get => widget.GraphLineWidth; set => widget.GraphLineWidth = value; }
     [Category("2 · Position / size")] public int X { get => widget.X; set => widget.X = value; }
     [Category("2 · Position / size")] public int Y { get => widget.Y; set => widget.Y = value; }
     [Category("2 · Position / size")] public int Width { get => widget.Width; set => widget.Width = value; }
@@ -287,13 +397,65 @@ internal sealed class WidgetProperties(LcdWidget widget)
     [Category("3 · Typography"), Description("Font size in physical design pixels, 6–120.")] public float FontSize { get => widget.FontSize; set => widget.FontSize = value; }
     [Category("3 · Typography")] public bool Bold { get => widget.Bold; set => widget.Bold = value; }
     [Category("3 · Typography")] public WidgetAlignment Alignment { get => widget.Alignment; set => widget.Alignment = value; }
-    [Category("4 · Colors")] public Color Foreground { get => FrameRenderer.ParseColor(widget.Foreground); set => widget.Foreground = $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
+    [Category("4 · Colors"), Description("Text color for Text widgets; progress fill / needle color for gauges. Click the dropdown to choose a color.")] public Color Foreground { get => FrameRenderer.ParseColor(widget.Foreground); set => widget.Foreground = $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
     [Category("4 · Colors"), Description("Transparent leaves the canvas/media visible.")] public Color Background { get => widget.Background.Length == 0 ? Color.Transparent : FrameRenderer.ParseColor(widget.Background); set => widget.Background = value.A == 0 ? "" : $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
-    [Category("5 · Radial gauge")] public double Minimum { get => widget.GaugeMinimum; set => widget.GaugeMinimum = value; }
-    [Category("5 · Radial gauge")] public double Maximum { get => widget.GaugeMaximum; set => widget.GaugeMaximum = value; }
-    [Category("5 · Radial gauge")] public float Thickness { get => widget.GaugeThickness; set => widget.GaugeThickness = value; }
-    [Category("5 · Radial gauge")] public float StartAngle { get => widget.GaugeStartAngle; set => widget.GaugeStartAngle = value; }
-    [Category("5 · Radial gauge")] public float SweepAngle { get => widget.GaugeSweepAngle; set => widget.GaugeSweepAngle = value; }
-    [Category("5 · Radial gauge")] public bool ShowText { get => widget.GaugeShowText; set => widget.GaugeShowText = value; }
-    [Category("5 · Radial gauge")] public Color TrackColor { get => FrameRenderer.ParseColor(widget.GaugeTrackColor); set => widget.GaugeTrackColor = $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
+    [Category("5 · Gauge"), Description("Value at the empty end of the gauge, in the selected source's units. Display only: it never changes fan control.")] public double Minimum { get => widget.GaugeMinimum; set => widget.GaugeMinimum = value; }
+    [Category("5 · Gauge"), Description("Value at full scale. Set to your GPU's capacity for a VRAM GiB gauge; use 100 for percent. Above-range values clamp visually, but the text remains the actual value.")] public double Maximum { get => widget.GaugeMaximum; set => widget.GaugeMaximum = value; }
+    [Category("5 · Gauge"), Description("Radial stroke width in design pixels. Does not affect horizontal/vertical bars.")] public float Thickness { get => widget.GaugeThickness; set => widget.GaugeThickness = value; }
+    [Category("5 · Gauge"), Description("Arc/segments/needle starting angle in degrees: 0 = right, 90 = down. Full ring and semicircle have fixed angles.")] public float StartAngle { get => widget.GaugeStartAngle; set => widget.GaugeStartAngle = value; }
+    [Category("5 · Gauge"), Description("Arc/segments/needle sweep in degrees, 1–360 clockwise. Full ring and semicircle ignore this field.")] public float SweepAngle { get => widget.GaugeSweepAngle; set => widget.GaugeSweepAngle = value; }
+    [Category("5 · Gauge"), Description("Number of blocks (4–80), used only for the segmented radial style.")] public int Segments { get => widget.GaugeSegments; set => widget.GaugeSegments = value; }
+    [Category("5 · Gauge"), Description("Show the formatted sensor value over the gauge. Turn off when using a separate Text widget for precise placement.")] public bool ShowText { get => widget.GaugeShowText; set => widget.GaugeShowText = value; }
+    [Category("5 · Gauge"), Description("Color of the empty bar or radial track.")] public Color TrackColor { get => FrameRenderer.ParseColor(widget.GaugeTrackColor); set => widget.GaugeTrackColor = $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
+    [Category("5 · Gauge"), Description("Independent gauge text color. Transparent means automatic: white for bars, Foreground for radial gauges.")] public Color TextColor { get => widget.GaugeTextColor.Length == 0 ? Color.Transparent : FrameRenderer.ParseColor(widget.GaugeTextColor); set => widget.GaugeTextColor = value.A == 0 ? "" : $"{value.R:X2}{value.G:X2}{value.B:X2}"; }
+}
+
+internal sealed class WidgetKindConverter() : EnumConverter(typeof(WidgetKind))
+{
+    internal static string Label(WidgetKind value) => value switch
+    {
+        WidgetKind.Text => "Text / sensor value", WidgetKind.HorizontalGauge => "Horizontal bar", WidgetKind.VerticalGauge => "Vertical bar",
+        WidgetKind.RadialGauge => "Radial arc", WidgetKind.RadialSegments => "Radial segments", WidgetKind.RadialNeedle => "Radial needle",
+        WidgetKind.RadialRing => "Radial full ring", WidgetKind.RadialSemicircle => "Radial semicircle",
+        WidgetKind.LineGraph => "Line graph · history", WidgetKind.BarGraph => "Bar graph · history", _ => value.ToString()
+    };
+    public override object? ConvertTo(ITypeDescriptorContext? context, CultureInfo? culture, object? value, Type destinationType) => destinationType == typeof(string) && value is WidgetKind kind ? Label(kind) : base.ConvertTo(context, culture, value, destinationType);
+    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value) => value is string text && Enum.GetValues<WidgetKind>().FirstOrDefault(k => Label(k) == text) is var kind && Label(kind) == text ? kind : base.ConvertFrom(context, culture, value);
+}
+
+internal sealed class WidgetSourceConverter() : EnumConverter(typeof(WidgetSource))
+{
+    public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context) => new(Enum.GetValues<WidgetSource>()
+        .Where(s => s is not (WidgetSource.CpuEnergy24hProjection or WidgetSource.GpuEnergy24hProjection or WidgetSource.EstimatedTotalEnergy24hProjection)).ToArray());
+    internal static string Label(WidgetSource value) => value switch
+    {
+        WidgetSource.Text => "Static text", WidgetSource.CpuTemperature => "CPU temperature (°C)", WidgetSource.CpuMaximumTemperature => "CPU hottest sensor (°C)",
+        WidgetSource.CpuLoad => "CPU load (%)", WidgetSource.CpuClockAverageMhz => "CPU core clocks · average (MHz)", WidgetSource.CpuClockMaximumMhz => "CPU core clocks · maximum (MHz)",
+        WidgetSource.GpuTemperature => "GPU core temperature (°C)", WidgetSource.GpuHotSpotTemperature => "GPU hotspot (°C)", WidgetSource.GpuMemoryTemperature => "GPU memory temperature (°C)",
+        WidgetSource.GpuLoad => "GPU load (%)", WidgetSource.GpuCoreClockMhz => "GPU core clock (MHz)", WidgetSource.GpuMemoryClockMhz => "GPU memory clock (MHz)",
+        WidgetSource.GpuVramUsedGiB => "GPU VRAM used (GiB)", WidgetSource.GpuVramTotalGiB => "GPU VRAM capacity (GiB)", WidgetSource.GpuVramUsedPercent => "GPU VRAM used (%)",
+        WidgetSource.GpuSharedMemoryUsedGiB => "GPU shared system RAM used (GiB)", WidgetSource.GpuSharedMemoryTotalGiB => "GPU shared system RAM limit (GiB)",
+        WidgetSource.CpuPowerWatts => "CPU package power (W)", WidgetSource.GpuPowerWatts => "GPU reported package/board power (W)", WidgetSource.EstimatedTotalPowerWatts => "Whole PC power · ESTIMATE (W)",
+        WidgetSource.CpuPowerAverageHour => "CPU power · last hour average (W)", WidgetSource.GpuPowerAverageHour => "GPU power · last hour average (W)", WidgetSource.EstimatedTotalPowerAverageHour => "Whole PC · ESTIMATED last hour average (W)",
+        WidgetSource.CpuEnergyTodayKwh => "CPU energy today · covered intervals (kWh)", WidgetSource.GpuEnergyTodayKwh => "GPU energy today · covered intervals (kWh)", WidgetSource.EstimatedTotalEnergyTodayKwh => "Whole PC energy today · ESTIMATE (kWh)",
+        WidgetSource.CpuEnergy24hProjection => "CPU energy · 24h PROJECTION (kWh)", WidgetSource.GpuEnergy24hProjection => "GPU energy · 24h PROJECTION (kWh)", WidgetSource.EstimatedTotalEnergy24hProjection => "Whole PC energy · 24h PROJECTION (kWh)",
+        WidgetSource.CpuEnergyLast24hKwh => "CPU energy · observed last 24h (kWh)", WidgetSource.GpuEnergyLast24hKwh => "GPU energy · observed last 24h (kWh)", WidgetSource.EstimatedTotalEnergyLast24hKwh => "Whole PC energy · observed last 24h, approximate (kWh)",
+        WidgetSource.MemoryUsedPercent => "System RAM used (%)", WidgetSource.Clock => "Clock", WidgetSource.Date => "Date",
+        WidgetSource.TopCpuProcess => "Top CPU process (text · monitoring must be enabled)", WidgetSource.TopGpuProcess => "Top GPU process (text · monitoring must be enabled)",
+        WidgetSource.TextFileLog => "Local text file · last lines", WidgetSource.TopCpuProcessLog => "Auto log · top CPU process", WidgetSource.TopGpuProcessLog => "Auto log · top GPU process",
+        WidgetSource.FanRpm => "Fan speed (RPM)", WidgetSource.FanDuty => "Fan duty (%)", _ => value.ToString()
+    };
+    public override object? ConvertTo(ITypeDescriptorContext? context, CultureInfo? culture, object? value, Type destinationType) => destinationType == typeof(string) && value is WidgetSource source ? Label(source) : base.ConvertTo(context, culture, value, destinationType);
+    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value) => value is string text && Enum.GetValues<WidgetSource>().FirstOrDefault(s => Label(s) == text) is var source && Label(source) == text ? source : base.ConvertFrom(context, culture, value);
+}
+
+internal sealed class LogPathEditor : UITypeEditor
+{
+    public override UITypeEditorEditStyle GetEditStyle(ITypeDescriptorContext? context) => UITypeEditorEditStyle.Modal;
+    public override object? EditValue(ITypeDescriptorContext? context, IServiceProvider provider, object? value)
+    {
+        using var dialog = new OpenFileDialog { Title = "Select a local log or text file", Filter = "Log / text / PresentMon CSV|*.log;*.txt;*.out;*.err;*.jsonl;*.csv|All files|*.*", CheckFileExists = true };
+        if (value is string path && File.Exists(path)) dialog.FileName = path;
+        return dialog.ShowDialog() == DialogResult.OK ? dialog.FileName : value;
+    }
 }
