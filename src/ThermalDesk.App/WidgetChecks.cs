@@ -58,6 +58,13 @@ internal static class WidgetChecks
             SpinWait.SpinUntil(() => Volatile.Read(ref control.LastDuty) == 100 || live.ControllerFault, 5000);
             Check(opens == 1 && control.LastDuty == 100, $"Live Full preset applies without reopening controller (opens={opens}, duty={control.LastDuty}, fault={live.ControllerFault}, log={string.Join("; ", live.Logs)})");
             Check(control.FirstDuty is >= 30 and < 100, "Healthy initial telemetry uses the curve, not an unconditional 100% burst");
+            FanPresets.Apply(changed.Ports[0], FanPreset.Silent); live.ApplyLiveSettings(changed);
+            Check(SpinWait.SpinUntil(() => Volatile.Read(ref control.LastDuty) < 100 || live.ControllerFault, 7000) && !live.ControllerFault && opens == 1,
+                "Silent takes effect in the existing session without Stop/Apply or reopening USB");
+            var quieterDuty = control.LastDuty;
+            changed.Ports[0].RgbEffect = RgbEffect.PaletteWave; changed.Ports[0].RgbPalette = ["FF0000", "AA00FF"]; changed.Ports[0].RgbDirection = RgbDirection.Reverse;
+            live.ApplyLiveSettings(changed);
+            Check(opens == 1 && control.LastDuty <= quieterDuty, "In-place lighting changes do not reopen USB or raise fan duty");
             bool topologyBlocked = false; changed.Ports[1].Role = PortRole.Fan; changed.Ports[1].Mode = ControlMode.Curve;
             try { live.ApplyLiveSettings(changed); } catch (InvalidOperationException) { topologyBlocked = true; }
             Check(topologyBlocked && opens == 1, "Live updates cannot silently add a managed port");

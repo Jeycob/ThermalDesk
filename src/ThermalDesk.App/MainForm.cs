@@ -329,7 +329,7 @@ internal sealed class MainForm : Form
             try
             {
                 var next = ReadSettings(); next.StartLiveAtSignIn = true; next.Validate();
-                if (MessageBox.Show("Start the saved live profile automatically after Windows sign-in?\n\nValidate every configured device and independent cooling protection first. The task runs elevated for sensor access. Close/disable vendor auto-start yourself only after hardware tests pass. Conflicts block startup; TT is never killed. This is not a before-login cooling service.\n\nHold Shift during launch to bypass live startup. Missing temperatures still request safe duty on managed channels.", "Confirm automatic live startup", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+                if (MessageBox.Show("Start the saved live profile automatically after Windows sign-in?\n\nValidate every configured device and independent cooling protection first. The task runs elevated for sensor access. Close/disable vendor auto-start yourself only after hardware tests pass. Conflicts block startup; TT is never killed. This is not a before-login cooling service.\n\nHold Shift during launch to bypass live startup. Missing temperatures prevent takeover or release captured duties; they never invent a full-speed command.", "Confirm automatic live startup", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
                 var old = settings.Copy(); SettingsStore.Save(configPath, next);
                 try { StartupManager.Configure(true); settings = next; Info("Elevated live sign-in task registered. Saved devices only; next sign-in will apply it."); }
                 catch { SettingsStore.Save(configPath, old); throw; }
@@ -397,11 +397,28 @@ internal sealed class MainForm : Form
     private static void Info(string text) => MessageBox.Show(text, "ThermalDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
     internal int ExerciseAutomaticSettingsForTest()
     {
-        smokeMode = true; poll.Value = 3; ApplyPendingSettings();
-        if (SettingsStore.Load(configPath).PollSeconds != 3 || engine.Live) throw new InvalidOperationException("Automatic preview persistence failed or opened hardware.");
-        cooling.Checked = true; ApplyPendingSettings();
-        if (!applyHint.StartsWith("Pending") || SettingsStore.Load(configPath).CoolingEnabled) throw new InvalidOperationException("Invalid automatic change was persisted.");
-        settingsDelay.Stop(); return 2;
+        // Real UI change events and WinForms timer; never Show/Start this form's engine.
+        void WaitFor(Func<bool> done)
+        {
+            var clock = Stopwatch.StartNew();
+            while (!done() && clock.ElapsedMilliseconds < 4000) { Application.DoEvents(); Thread.Sleep(10); }
+            if (!done()) throw new InvalidOperationException("Automatic UI change did not complete within four seconds.");
+        }
+        smokeMode = false;
+        try
+        {
+            poll.Value = 3;
+            WaitFor(() => File.Exists(configPath) && SettingsStore.Load(configPath).PollSeconds == 3);
+            if (engine.Live || engine.Running) throw new InvalidOperationException("Editing preview opened hardware or started a session.");
+            cooling.Checked = true;
+            WaitFor(() => applyHint.StartsWith("Pending"));
+            if (SettingsStore.Load(configPath).CoolingEnabled) throw new InvalidOperationException("Invalid automatic change was persisted.");
+            cooling.Checked = false; poll.Value = 4; poll.Value = 5;
+            WaitFor(() => SettingsStore.Load(configPath).PollSeconds == 5);
+            if (!applyHint.StartsWith("Profile saved")) throw new InvalidOperationException("Valid correction was not automatically applied.");
+            return 3;
+        }
+        finally { smokeMode = true; settingsDelay.Stop(); }
     }
     protected override void Dispose(bool disposing)
     { if (disposing) { settingsDelay.Dispose(); refresh.Dispose(); } base.Dispose(disposing); }

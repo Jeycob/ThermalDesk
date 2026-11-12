@@ -74,7 +74,7 @@ This is **not** a universal replacement for every TT product or feature: no PSU 
 - Native per-LCD widget editor: drag/resize, numeric bounds, font picker, size, bold, custom text, colors, alignment and sensor bindings. Editable radial gauges include range, thickness, track color and arc angles.
 - Image/GIF fitting preserves aspect ratio. GIF frames are sampled at the configured refresh rate; no video decoder runs in the background.
 - Per-port Preserve / Fixed / Curve cooling, Silent / Custom / Full presets, named locations, draggable curve points, TT nine-point curve import, fan/pump roles, minimum speeds, CPU/GPU sensor selection and optional read-only RPM feedback.
-- Per-port Static, Breathing, Blink, ColorCycle, RainbowWave and Temperature RGB effects. Color, brightness, LED count and period are editable. Animations are capped at 5 FPS; thermal decisions run first.
+- Per-port Static, Breathing, Blink, ColorCycle, RainbowWave, PaletteWave and Temperature RGB effects. PaletteWave blends 2–8 comma-separated hex colors around the LED ring (for example `FF0000, AA00FF`). Wave direction, color, brightness, LED count and period are editable. Existing profiles keep their original effects. Animations are capped at 5 FPS; thermal decisions run first.
 - The port editor shows a live preview of its planned RGB frame. It is not a claim of physical LED feedback; close the editor to accept and automatically apply the change.
 - JSON profiles, bounded in-memory log, diagnostics export, tray operation and opt-in preview or elevated saved-live sign-in startup.
 - Latest-snapshot telemetry and separate device loops: a stalled display does not block fan control. No thread per sensor, fan, or LED.

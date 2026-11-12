@@ -134,6 +134,29 @@ lightPort.RgbEffect = RgbEffect.RainbowWave; Check(Lighting.Frame(lightPort, "FF
 lightPort.RgbEffect = RgbEffect.Temperature; lightPort.Source = TemperatureSource.Cpu;
 Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele(85))[0] == new LedColor(255, 0, 0), "critical RGB indication");
 Check(Lighting.Frame(lightPort, "FFFFFF", 0, Tele(null))[0] == new LedColor(255, 160, 0), "missing sensor lighting is amber");
+lightPort.RgbEffect = RgbEffect.PaletteWave; lightPort.LedCount = 4; lightPort.RgbPalette = ["FF0000", "0000FF"];
+var gradient = Lighting.Frame(lightPort, "FFFFFF", 0, Tele());
+Check(gradient.SequenceEqual(new LedColor[] { new(255, 0, 0), new(128, 0, 128), new(0, 0, 255), new(128, 0, 128) }), "palette interpolates and closes the LED ring smoothly");
+var forward = Lighting.Frame(lightPort, "FFFFFF", 1, Tele());
+lightPort.RgbDirection = RgbDirection.Reverse;
+Check(forward.SequenceEqual(Lighting.Frame(lightPort, "FFFFFF", -1, Tele())), "reverse direction mirrors animation time");
+Check(!forward.SequenceEqual(Lighting.Frame(lightPort, "FFFFFF", 1, Tele())), "wave direction changes movement");
+Check(gradient.SequenceEqual(Lighting.Frame(lightPort, "FFFFFF", 4, Tele())), "palette wave is periodic");
+lightPort.RgbBrightness = 0; Check(Lighting.Frame(lightPort, "FFFFFF", 1, Tele()).All(c => c == new LedColor(0, 0, 0)), "palette obeys zero brightness");
+lightPort.RgbBrightness = 100; lightPort.LedCount = 12;
+var paletteCopy = lightPort.Copy(); paletteCopy.RgbPalette[0] = "00FF00";
+Check(lightPort.RgbPalette[0] == "FF0000", "copied palettes are independent");
+foreach (var invalidPalette in new List<string>[] { [], ["FFFFFF"], ["nothex", "FFFFFF"], ["", "FFFFFF"], Enumerable.Repeat("FFFFFF", 9).ToList() })
+{
+    var invalid = lightPort.Copy(); invalid.RgbPalette = invalidPalette;
+    Throws(() => Lighting.Frame(invalid, "FFFFFF", 0, Tele()), "invalid palette rejected before RGB frame");
+    var invalidSettings = new Settings(); invalidSettings.Ports[0] = invalid;
+    Throws(invalidSettings.Validate, "invalid palette profile rejected");
+}
+var invalidDirection = lightPort.Copy(); invalidDirection.RgbDirection = (RgbDirection)42;
+Throws(() => Lighting.Frame(invalidDirection, "FFFFFF", 0, Tele()), "invalid direction rejected");
+var legacyPort = System.Text.Json.JsonSerializer.Deserialize<PortSettings>("{\"Port\":1,\"RgbEffect\":\"Static\"}", Settings.JsonOptions)!;
+Check(legacyPort.RgbPalette.Count == 0 && legacyPort.RgbDirection == RgbDirection.Forward, "old profiles keep legacy default lighting");
 foreach (var effect in Enum.GetValues<RgbEffect>())
 {
     lightPort.RgbEffect = effect;

@@ -31,7 +31,7 @@ internal sealed class RgbPreview(Func<PortSettings> read, Func<Telemetry> teleme
                 e.Graphics.FillRectangle(brush, 5 + i * width, 22, Math.Max(1, width - 1), Math.Max(1, ClientSize.Height - 25));
             }
         }
-        catch (Exception) { e.Graphics.DrawString("RGB preview pending · finish the color/period field", font, Brushes.Orange, 5, 9); }
+        catch (Exception) { e.Graphics.DrawString("RGB preview pending · finish color / palette / period", font, Brushes.Orange, 5, 9); }
     }
     protected override void Dispose(bool disposing) { if (disposing) tick.Dispose(); base.Dispose(disposing); }
 }

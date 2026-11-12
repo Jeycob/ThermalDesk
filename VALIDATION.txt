@@ -185,3 +185,13 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
 - Port editor now previews the exact planned RGB frame/LED count/effect at 4 FPS
   while visible. This is explicitly not physical LED readback. No live launch
   or fan/RGB hardware test is part of this follow-up.
+
+0.3.5 SOFTWARE-ONLY FOLLOW-UP
+- PaletteWave adds 2–8 custom colors, smooth closed-ring interpolation and
+  forward/reverse animation. Old JSON profiles retain their original defaults.
+- Invalid palettes/directions are blocked by profile validation and frame
+  generation before sending any command. The native editor previews the result.
+- UI regression checks now drive real value-change events and the debounce
+  timer, including recovery after an incomplete/invalid edit, without starting
+  a hardware session. Fake-controller checks cover Full -> Silent and lighting
+  updates without a second USB open. No live fan/RGB test or deployment launch.
