@@ -18,6 +18,33 @@ For actual hardware:
 
 No existing TT installation, startup task, driver, or profile is automatically changed. **Stop** releases devices. To return to TT RGB Plus, stop/exit ThermalDesk first, then start TT RGB Plus.
 
+### Changing settings without Stop/Apply
+
+Valid edits to curves, Silent/Custom/Full, RGB effects and LCD widgets save and
+apply automatically after a 450 ms pause. They do not reconnect the controller.
+Read-only RPM/duty feedback never triggers another settings update. Temperature
+hysteresis and downward speed smoothing still apply, so a quieter target can
+take several seconds to reach; the table shows requested, target and reported duty.
+
+Changing enabled devices, wiring/port roles or connection settings still requires
+an explicit stop and new confirmation. A latched USB fault is not silently retried.
+On initial cooling startup the app waits up to 20 seconds for valid temperatures
+**before opening the fan controller**. Changing the pending profile during that
+wait uses the latest settings. Timeout/cancellation sends no fan-speed commands.
+
+### Damaged or unreadable profile
+
+The app opens **Preview only** with a visible recovery warning. Automatic live
+startup, `--live-once` and start-minimized are bypassed for that launch. No device
+or fan control is enabled by recovery.
+
+Normal saves keep the last valid profile as `settings.json.previous`. A malformed
+profile is copied to a timestamped `.invalid-…json` file before replacement; the
+original is not silently discarded. Recovery can use the valid previous profile's
+editable settings, but leaves hardware disabled until you review and enable it.
+Profiles above 1 MiB are not duplicated or implicitly overwritten. Unreadable
+profiles remain in place. These are recovery aids, not a replacement for backups.
+
 Both LCDs are disabled in a fresh profile. **Start live control** now rejects an
 empty selection instead of silently running sensors with no display. The lower
 status bar shows **Limited user** or **Administrator**. On this PC, use

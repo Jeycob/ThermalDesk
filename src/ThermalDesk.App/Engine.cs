@@ -9,9 +9,14 @@ internal sealed class Engine
     private readonly Func<string, IFanController> openController;
     private readonly Func<Telemetry>? testTelemetry;
     private readonly Func<string[]> conflicts;
+    private readonly TimeSpan initialTemperatureTimeout;
     public Engine() : this(serial => new FanController(serial), null, Conflicts) { }
-    internal Engine(Func<string, IFanController> controllerFactory, Func<Telemetry>? telemetryReader, Func<string[]> findConflicts)
-    { openController = controllerFactory; testTelemetry = telemetryReader; conflicts = findConflicts; }
+    internal Engine(Func<string, IFanController> controllerFactory, Func<Telemetry>? telemetryReader, Func<string[]> findConflicts, TimeSpan? startupTimeout = null)
+    {
+        openController = controllerFactory; testTelemetry = telemetryReader; conflicts = findConflicts;
+        initialTemperatureTimeout = startupTimeout ?? TimeSpan.FromSeconds(20);
+        if (initialTemperatureTimeout <= TimeSpan.Zero || initialTemperatureTimeout > TimeSpan.FromMinutes(1)) throw new ArgumentOutOfRangeException(nameof(startupTimeout));
+    }
     private CancellationTokenSource? stop;
     private Task[] tasks = [];
     private Telemetry latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
@@ -186,17 +191,30 @@ internal sealed class Engine
             while (!token.IsCancellationRequested)
             {
                 IFanController? controller = null;
+                bool controllerAttempted = false;
                 try
                 {
-                    // Let the shared sampler publish its first reading before taking control.
-                    // A healthy start uses the real curve. Missing initial sensor data
-                    // aborts before opening the controller; it is not a full-speed command.
+                    // Drivers can publish an initial timestamp before temperatures are ready.
+                    // Wait BEFORE opening USB. This is not a reconnect or a full-speed fallback.
                     var startupWait = Stopwatch.StartNew();
-                    while (monitored.Length > 0 && Latest.Time == DateTimeOffset.MinValue && startupWait.Elapsed.TotalSeconds < 4)
-                    { Guard(token); await Task.Delay(50, token); }
-                    var initialDecisions = monitored.ToDictionary(p => p.Port, p => policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, s.PollSeconds));
-                    if (initialDecisions.Values.Any(x => x.Duty is null)) throw new IOException("Initial temperature unavailable. Controller left untouched; keep vendor cooling active.");
-                    Guard(token); controller = openController(s.ControllerSerial);
+                    Dictionary<int, FanDecision> initialDecisions;
+                    while (true)
+                    {
+                        Guard(token); s = Volatile.Read(ref current);
+                        monitored = s.Ports.Where(p => s.CoolingEnabled && p.Mode != ControlMode.Preserve).ToArray();
+                        // No duty was sent yet, so do not inherit smoothing history from
+                        // a partial/invalid readiness sample or an older pending profile.
+                        foreach (var policy in policies.Values) policy.Reset();
+                        var sample = Latest; var now = DateTimeOffset.UtcNow;
+                        initialDecisions = monitored.ToDictionary(p => p.Port, p => policies[p.Port].Evaluate(p, sample, now, 0));
+                        var notReady = initialDecisions.Values.FirstOrDefault(d => d.Duty is null);
+                        if (notReady is null) break;
+                        if (startupWait.Elapsed >= initialTemperatureTimeout)
+                            throw new IOException("Temperature readiness timed out. No fan controller opened or speed command sent. Keep vendor cooling active. " + notReady.Reason);
+                        SetStatus("Controller", "Waiting for valid temperatures · no fan-controller commands · " + notReady.Reason);
+                        await Task.Delay(50, token);
+                    }
+                    Guard(token); controllerAttempted = true; controller = openController(s.ControllerSerial);
                     var lastDuty = new Dictionary<int, int>();
                     foreach (var p in monitored)
                     {
@@ -258,8 +276,11 @@ internal sealed class Engine
                 catch (Exception e)
                 {
                     controllerFault = true;
-                    SetStatus("Controller", "FAULT LATCHED · " + e.Message + " · captured duties requested back; no forced full-speed fallback or automatic reconnect. Restore vendor control.");
-                    foreach (var p in monitored) SetStatus($"Port {p.Port}", "FAULT · release requested · verify vendor control");
+                    SetStatus("Controller", controller is null
+                        ? (controllerAttempted ? "FAULT LATCHED · connection attempt failed; ownership not established · " : "FAULT LATCHED · startup blocked before fan USB access · ") + e.Message
+                        : "FAULT LATCHED · " + e.Message + " · captured duties requested back; no forced full-speed fallback or automatic reconnect. Restore vendor control.");
+                    foreach (var p in monitored) SetStatus($"Port {p.Port}", controller is null
+                        ? "NOT STARTED · no software speed ownership established" : "FAULT · release requested · verify vendor control");
                     Fans.Clear(); FanCommands.Clear();
                     break;
                 }

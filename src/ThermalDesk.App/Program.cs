@@ -25,8 +25,10 @@ internal static class Program
         {
             string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ThermalDesk", "settings.json");
             // Preview never reads saved live configuration or opens hardware.
-            var config = args.Contains("--render-preview") || args.Contains("--benchmark-preview") ? new Settings() : SettingsStore.Load(path);
-            using var form = new MainForm(config, path);
+            var loaded = args.Contains("--render-preview") || args.Contains("--benchmark-preview")
+                ? new StartupProfile(new Settings(), false, "", null) : SettingsStore.LoadForStartup(path);
+            var config = loaded.Settings;
+            using var form = new MainForm(config, path, startupWarning: loaded.Warning);
             int status = Array.IndexOf(args, "--status-output");
             if (status >= 0)
             {
@@ -45,8 +47,8 @@ internal static class Program
                 if (preview + 1 >= args.Length) throw new ArgumentException("Specify a preview PNG path.");
                 form.RenderPreview(Path.GetFullPath(args[preview + 1])); return 0;
             }
-            form.StartMinimized = args.Contains("--minimized");
-            form.StartupRequested = StartupManager.ShouldStartLive(config, args, (Control.ModifierKeys & Keys.Shift) != 0);
+            form.StartMinimized = StartupManager.ShouldStartMinimized(args, loaded.Recovered);
+            form.StartupRequested = StartupManager.ShouldStartLive(config, args, (Control.ModifierKeys & Keys.Shift) != 0, loaded.Recovered);
             Application.Run(form);
             return 0;
         }

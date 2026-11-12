@@ -241,10 +241,55 @@ Check(sensorNoCore.GpuTemperature is null && sensorNoCore.GpuHotSpotTemperature 
 Check(!FanSafety.IsCritical(sensorNoCore with { CpuMaximumTemperature = 60 }, now), "GPU hotspot is not mistaken for the core critical threshold");
 var sensorInvalid = SensorProjection.Project([new("cpu", "CPU", DeviceCategory.Cpu, [new("CPU Package", SensorMetric.Temperature, 0), new("CPU Total", SensorMetric.Load, 101)]), new("gpu", "GPU", DeviceCategory.NvidiaGpu, [new("GPU Core", SensorMetric.Temperature, double.NaN), new("GPU Core", SensorMetric.Load, -1)])], now);
 Check(sensorInvalid.CpuTemperature is null && sensorInvalid.GpuTemperature is null && sensorInvalid.CpuLoad is null && sensorInvalid.GpuLoad is null, "sentinel temperatures and out-of-range loads are unavailable");
-Check(sensorInvalid.Warning.Contains("never forced to 100%"), "missing-sensor explanation matches quiet release policy");
+Check(sensorInvalid.Warning.Contains("Missing data alone never forces 100%"), "missing-sensor explanation distinguishes data loss from genuinely critical heat");
 Check(SensorProjection.Project(sensorDevices.Where(d => d.Category != DeviceCategory.NvidiaGpu).ToArray(), now).GpuDeviceId == "igpu", "automatic can use AMD when no NVIDIA device exists");
 Check(WidgetLayout.NumericValue(new LcdWidget { Source = WidgetSource.CpuMaximumTemperature }, sensorProjected) == 90, "maximum CPU sensor can be selected as an LCD widget");
 Check(!FanSafety.IsCritical(Tele() with { CpuMaximumTemperature = 150 }, now), "implausible maximum CPU sentinel cannot synthesize critical duty");
 settings = new(); settings.PreferredGpuId = "rtx"; Check(settings.Copy().PreferredGpuId == "rtx", "preferred GPU survives profile copy");
 settings.PreferredGpuId = "bad\nidentifier"; Throws(settings.Validate, "GPU identifier rejects control characters");
+string recoveryFolder = Path.Combine(Path.GetTempPath(), "thermaldesk-recovery-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(recoveryFolder); string recoveryPath = Path.Combine(recoveryFolder, "settings.json");
+try
+{
+    var emptyStartup = SettingsStore.LoadForStartup(recoveryPath);
+    Check(!emptyStartup.Recovered && !emptyStartup.Settings.CoolingEnabled && !File.Exists(recoveryPath), "missing startup profile remains a normal no-write default");
+    var armedProfile = new Settings { PollSeconds = 3, CoolingEnabled = true, CoolingWiringConfirmed = true, RgbEnabled = true, MonitorFanController = true, StartLiveAtSignIn = true, Aio = new() { Enabled = true }, Panel = new() { Enabled = true } };
+    armedProfile.Ports[0].Role = PortRole.Fan; armedProfile.Ports[0].Mode = ControlMode.Fixed; armedProfile.Ports[0].Rgb = true;
+    SettingsStore.Save(recoveryPath, armedProfile);
+    Check(!SettingsStore.LoadForStartup(recoveryPath).Recovered && SettingsStore.Load(recoveryPath).StartLiveAtSignIn, "valid startup profile keeps explicit arming");
+    var laterProfile = armedProfile.Copy(); laterProfile.PollSeconds = 4; SettingsStore.Save(recoveryPath, laterProfile);
+    string previousBytes = File.ReadAllText(recoveryPath + ".previous");
+    Check(SettingsStore.Load(recoveryPath + ".previous").PollSeconds == 3 && SettingsStore.Load(recoveryPath).PollSeconds == 4, "atomic save retains the preceding validated profile");
+    const string damaged = "{broken profile"; File.WriteAllText(recoveryPath, damaged);
+    var recoveredProfile = SettingsStore.LoadForStartup(recoveryPath);
+    Check(recoveredProfile.Recovered && recoveredProfile.Settings.PollSeconds == 3, "damaged JSON recovers the prior profile for editing");
+    Check(!recoveredProfile.Settings.CoolingEnabled && !recoveredProfile.Settings.CoolingWiringConfirmed && !recoveredProfile.Settings.RgbEnabled && !recoveredProfile.Settings.MonitorFanController && !recoveredProfile.Settings.StartLiveAtSignIn && !recoveredProfile.Settings.Aio.Enabled && !recoveredProfile.Settings.Panel.Enabled, "recovery de-arms every live channel and sign-in flag");
+    Check(recoveredProfile.PreservedPath is not null && File.ReadAllText(recoveredProfile.PreservedPath) == damaged && File.ReadAllText(recoveryPath) == damaged, "damaged original is copied, never moved or overwritten during startup");
+    Check(File.ReadAllText(recoveryPath + ".previous") == previousBytes && recoveredProfile.Warning.Contains("Preview only"), "recovery does not rewrite the last good profile and clearly explains preview");
+    SettingsStore.Save(recoveryPath, recoveredProfile.Settings);
+    Check(!SettingsStore.LoadForStartup(recoveryPath).Recovered && !SettingsStore.Load(recoveryPath).StartLiveAtSignIn, "reviewed preview profile can be saved without rearming");
+    Check(File.ReadAllText(recoveryPath + ".previous") == previousBytes, "saving over corruption cannot poison the valid backup");
+    foreach (string corrupt in new[] { "null", "{\"PollSeconds\":99}", "{\"Ports\":null}", "{\"Panel\":null}", "{\"Aio\":null}", "{\"RgbColor\":null}", "{\"ControllerSerial\":null}", "{\"Ports\":[null,null,null,null,null]}" })
+    {
+        File.WriteAllText(recoveryPath, corrupt); var broken = SettingsStore.LoadForStartup(recoveryPath);
+        Check(broken.Recovered && !broken.Settings.StartLiveAtSignIn && !broken.Settings.CoolingEnabled, "invalid profile shape recovers without enabling hardware");
+    }
+    var invalidCurveProfile = new Settings(); invalidCurveProfile.Ports[0].Curve = null!;
+    File.WriteAllText(recoveryPath, System.Text.Json.JsonSerializer.Serialize(invalidCurveProfile, Settings.JsonOptions));
+    Check(SettingsStore.LoadForStartup(recoveryPath).Recovered, "null curve shape cannot crash startup");
+    File.WriteAllText(recoveryPath, damaged); File.WriteAllText(recoveryPath + ".previous", damaged);
+    var noGoodBackup = SettingsStore.LoadForStartup(recoveryPath);
+    Check(noGoodBackup.Recovered && noGoodBackup.Settings.PollSeconds == 2 && !noGoodBackup.Settings.CoolingEnabled, "invalid backup falls back to unarmed defaults");
+    File.WriteAllText(recoveryPath, new string('x', SettingsStore.MaximumProfileBytes + 1));
+    var largeProfile = SettingsStore.LoadForStartup(recoveryPath);
+    Check(largeProfile.Recovered && largeProfile.PreservedPath is null && new FileInfo(recoveryPath).Length == SettingsStore.MaximumProfileBytes + 1, "oversized profile stays in place, not copied into another large file");
+    bool refusedLargeOverwrite = false; try { SettingsStore.Save(recoveryPath, new Settings()); } catch (InvalidDataException) { refusedLargeOverwrite = true; }
+    Check(refusedLargeOverwrite && new FileInfo(recoveryPath).Length == SettingsStore.MaximumProfileBytes + 1, "oversized original cannot be overwritten implicitly");
+}
+finally
+{
+    // This exact GUID directory was created above and contains only test fixtures.
+    foreach (string file in Directory.GetFiles(recoveryFolder)) File.Delete(file);
+    Directory.Delete(recoveryFolder);
+}
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");

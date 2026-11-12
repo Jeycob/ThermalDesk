@@ -34,7 +34,7 @@ public static class SensorProjection
         var memory = Best(devices.Where(d => d.Category == DeviceCategory.Memory).SelectMany(d => d.Sensors), SensorMetric.Load,
             n => !Has(n, "Virtual") && (n.Equals("Memory", StringComparison.OrdinalIgnoreCase) || Has(n, "Physical")), 0, 100);
         var warnings = new List<string>();
-        if (cpu is null) warnings.Add("CPU temperature unavailable. Check supported LHM/PawnIO setup; control is not taken over or is released, never forced to 100%.");
+        if (cpu is null) warnings.Add("CPU temperature unavailable. Check supported LHM/PawnIO setup. Missing data alone never forces 100%; genuinely critical heat is a separate condition.");
         if (gpu is null && preferredGpuId.Length > 0) warnings.Add("Selected GPU unavailable; no other GPU was substituted.");
         else if (gpu is not null && core is null) warnings.Add("GPU core temperature unavailable on the selected device.");
         return new(time, cpu?.Value, core?.Value, cpuLoad?.Value, gpuLoad?.Value, memory?.Value, string.Join(" ", warnings))

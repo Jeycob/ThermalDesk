@@ -13,6 +13,7 @@ internal sealed class MainForm : Form
     private static readonly Color Background = Color.FromArgb(10, 17, 29), Surface = Color.FromArgb(22, 34, 48), Accent = Color.FromArgb(38, 218, 179), Muted = Color.FromArgb(151, 172, 191);
     private readonly Engine engine;
     private readonly string configPath;
+    private readonly string startupWarning;
     private Settings settings;
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
     private readonly System.Windows.Forms.Timer settingsDelay = new() { Interval = 450 };
@@ -41,9 +42,9 @@ internal sealed class MainForm : Form
     public bool StartMinimized { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool StartupRequested { get; set; }
-    public MainForm(Settings initial, string path, Engine? testEngine = null)
+    public MainForm(Settings initial, string path, Engine? testEngine = null, string startupWarning = "")
     {
-        engine = testEngine ?? new(); settings = initial; configPath = path;
+        engine = testEngine ?? new(); settings = initial; configPath = path; this.startupWarning = startupWarning;
         foreach (var port in initial.Ports) portDesign[port.Port] = port.Copy();
         Text = "ThermalDesk · local hardware control"; BackColor = Background; ForeColor = Color.White;
         Font = new Font("Segoe UI", 10); ClientSize = new Size(1180, 820); MinimumSize = new Size(1000, 720);
@@ -287,8 +288,9 @@ internal sealed class MainForm : Form
         session.ForeColor = engine.Live ? Color.FromArgb(255, 194, 100) : Accent;
         liveButton.Text = engine.Running && engine.Live ? "Live · automatic" : "Start live control";
         liveButton.Enabled = !engine.Running || !engine.Live;
-        if (engine.ControllerFault) session.Text = "CONTROLLER FAULT · release requested · restore vendor control · see log";
+        if (engine.ControllerFault) session.Text = "CONTROLLER BLOCKED / FAULT · see log · verify vendor control";
         if (applyHint.Length > 0) session.Text += " · " + applyHint;
+        if (startupWarning.Length > 0) { session.Text += " · PROFILE RECOVERY · review Log before enabling devices"; session.ForeColor = Color.Orange; }
         deviceStatus.Text = string.Join(Environment.NewLine + Environment.NewLine, engine.Status.OrderBy(x => x.Key).Select(x => x.Key + "\r\n" + x.Value)) + "\r\n\r\n" + string.Join("\r\n", engine.Fans.Values.OrderBy(x => x.Port).Select(x => $"Port {x.Port}: {x.Rpm} RPM / reported {x.Duty}%"));
         foreach (DataGridViewRow row in ports.Rows)
         {
@@ -298,7 +300,7 @@ internal sealed class MainForm : Form
             void Update(int column, string value) { if (!Equals(row.Cells[column].Value, value)) row.Cells[column].Value = value; }
             Update(10, requested); Update(11, hasReading ? reading!.Duty.ToString(CultureInfo.InvariantCulture) : "—"); Update(12, hasReading ? reading!.Rpm.ToString(CultureInfo.InvariantCulture) : "—");
         }
-        log.Text = string.Join(Environment.NewLine, engine.Logs);
+        log.Text = (startupWarning.Length == 0 ? "" : "STARTUP RECOVERY: " + startupWarning + Environment.NewLine + Environment.NewLine) + string.Join(Environment.NewLine, engine.Logs);
         if (panelPreview.Visible) try { var a = panelRenderer.Render(t, settings.Panel, 480, 128); var old = panelPreview.Image; panelPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · panel preview: " + e.Message; }
         if (aioPreview.Visible) try { var a = aioRenderer.Render(t, settings.Aio, 480, 480); var old = aioPreview.Image; aioPreview.Image = a; old?.Dispose(); } catch (Exception e) { session.Text += " · AIO preview: " + e.Message; }
         using var p = Process.GetCurrentProcess();
@@ -445,6 +447,13 @@ internal sealed class MainForm : Form
             return 3;
         }
         finally { smokeMode = true; settingsDelay.Stop(); }
+    }
+    internal int VerifyRecoveryUiForTest(string screenshot)
+    {
+        RenderPreview(screenshot);
+        if (!session.Text.Contains("PROFILE RECOVERY") || !log.Text.StartsWith("STARTUP RECOVERY:")) throw new InvalidOperationException("Recovery reason is not visible in the UI.");
+        if (cooling.Checked || rgb.Checked || monitorFans.Checked || engine.Live) throw new InvalidOperationException("Recovery UI armed a hardware channel.");
+        return 2;
     }
     internal int ExerciseLiveAutomaticSettingsForTest(string screenshot)
     {

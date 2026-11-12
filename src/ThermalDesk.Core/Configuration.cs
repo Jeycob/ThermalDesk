@@ -107,6 +107,9 @@ public sealed class Settings
     public void Validate()
     {
         if (SchemaVersion != 1) throw new ArgumentException("Unsupported configuration version.");
+        if (Ports is null || Ports.Any(p => p is null) || Panel is null || Aio is null || RgbColor is null || ControllerSerial is null)
+            throw new ArgumentException("Profile contains a null required object or field.");
+        if (ControllerSerial.Length > 200 || ControllerSerial.Any(char.IsControl)) throw new ArgumentException("Controller serial must be at most 200 printable characters.");
         if (PollSeconds is < 1 or > 10) throw new ArgumentException("Polling must be 1–10 seconds.");
         if (PreferredGpuId is null || PreferredGpuId.Length > 200 || PreferredGpuId.Any(char.IsControl)) throw new ArgumentException("GPU identifier must be at most 200 printable characters.");
         if (Ports.Count != 5 || !Ports.Select(p => p.Port).Order().SequenceEqual(Enumerable.Range(1, 5)))
@@ -115,6 +118,8 @@ public sealed class Settings
         if (RgbEnabled && Ports.All(p => !p.Rgb)) throw new ArgumentException("Select at least one RGB port.");
         foreach (var p in Ports)
         {
+            if (p.Curve is null || p.Curve.Any(x => x is null) || p.CustomCurveBackup is null || p.CustomCurveBackup.Any(x => x is null))
+                throw new ArgumentException($"Port {p.Port}: curve data must not be null.");
             if (p.Name is null || p.Name.Length > 40 || p.Name.Any(char.IsControl)) throw new ArgumentException("Port names must be at most 40 printable characters.");
             if (!Enum.IsDefined(p.Role) || !Enum.IsDefined(p.Mode) || !Enum.IsDefined(p.Source)) throw new ArgumentException("Invalid port setting.");
             if (!Enum.IsDefined(p.RgbEffect) || p.RgbBrightness is < 0 or > 100 || !double.IsFinite(p.RgbPeriodSeconds) || p.RgbPeriodSeconds is < 1 or > 60 || !WidgetLayout.IsColor(p.RgbColor, true))
@@ -136,6 +141,7 @@ public sealed class Settings
         }
         foreach (var d in new[] { Panel, Aio })
         {
+            if (d.MediaPath is null) throw new ArgumentException("Display media path must not be null.");
             if (!Enum.IsDefined(d.Content) || d.Brightness is < 0 or > 100 || d.FramesPerSecond is < 1 or > 10 || d.Rotation is not (0 or 90 or 180 or 270))
                 throw new ArgumentException("Invalid display setting.");
             if (d.Enabled && d.Content == DisplayContent.Image && !File.Exists(d.MediaPath))
@@ -158,22 +164,78 @@ public sealed class Settings
     public static JsonSerializerOptions JsonOptions => new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 }
 
+public sealed record StartupProfile(Settings Settings, bool Recovered, string Warning, string? PreservedPath);
+
 public static class SettingsStore
 {
+    public const int MaximumProfileBytes = 1024 * 1024;
     public static Settings Load(string path)
     {
-        if (!File.Exists(path)) return new();
-        var s = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), Settings.JsonOptions)
-            ?? throw new InvalidDataException("Empty settings file.");
-        s.Validate();
-        return s;
+        FileStream stream;
+        try { stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); }
+        catch (FileNotFoundException) { return new(); }
+        catch (DirectoryNotFoundException) { return new(); }
+        using (stream)
+        {
+            if (stream.Length > MaximumProfileBytes) throw new InvalidDataException("Settings exceed the 1 MiB profile limit. Move the original aside before saving a replacement.");
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            var s = JsonSerializer.Deserialize<Settings>(reader.ReadToEnd(), Settings.JsonOptions) ?? throw new InvalidDataException("Empty settings file.");
+            s.Validate(); return s;
+        }
+    }
+    private static string PreserveInvalid(string path)
+    {
+        if (new FileInfo(path).Length > MaximumProfileBytes) throw new InvalidDataException("Oversized original left untouched; move it aside before saving a replacement.");
+        string preserved = path + ".invalid-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmss") + "-" + Guid.NewGuid().ToString("N") + ".json";
+        File.Copy(path, preserved, false); return preserved;
+    }
+    public static StartupProfile LoadForStartup(string path)
+    {
+        try { return new(Load(path), false, "", null); }
+        catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            string? preserved = null;
+            try { if (File.Exists(path)) preserved = PreserveInvalid(path); }
+            catch (Exception copyError) when (copyError is InvalidDataException or IOException or UnauthorizedAccessException) { }
+            var recovered = new Settings(); bool previous = false;
+            try { if (File.Exists(path + ".previous")) { recovered = Load(path + ".previous"); previous = true; } }
+            catch (Exception backupError) when (backupError is JsonException or ArgumentException or InvalidDataException or IOException or UnauthorizedAccessException) { }
+            // A valid old backup is useful for editing, never authority to rearm hardware.
+            recovered.StartLiveAtSignIn = recovered.CoolingEnabled = recovered.RgbEnabled = recovered.MonitorFanController = recovered.CoolingWiringConfirmed = false;
+            recovered.Aio.Enabled = recovered.Panel.Enabled = false;
+            string warning = "Saved profile could not be loaded (" + error.GetType().Name + "). " +
+                (previous ? "Previous profile opened in Preview only. " : "Defaults opened in Preview only. ") +
+                "All live controls are disabled. " + (preserved is null ? "Original file left untouched; it must be preserved before a replacement can be saved." : "Original copy: " + preserved);
+            return new(recovered, true, warning, preserved);
+        }
     }
     public static void Save(string path, Settings settings)
     {
         settings.Validate();
+        string json = JsonSerializer.Serialize(settings, Settings.JsonOptions);
+        if (System.Text.Encoding.UTF8.GetByteCount(json) > MaximumProfileBytes) throw new InvalidDataException("Profile exceeds the 1 MiB limit.");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        bool exists;
+        try { _ = File.GetAttributes(path); exists = true; }
+        catch (FileNotFoundException) { exists = false; }
+        catch (DirectoryNotFoundException) { exists = false; }
+        if (exists)
+        {
+            bool valid = false;
+            try { Load(path); valid = true; }
+            catch (Exception error) when (error is JsonException or ArgumentException or InvalidDataException) { PreserveInvalid(path); }
+            if (valid) File.Copy(path, path + ".previous", true);
+        }
         string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(settings, Settings.JsonOptions));
-        File.Move(temporary, path, true);
+        bool created = false;
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                created = true; stream.Write(System.Text.Encoding.UTF8.GetBytes(json)); stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path, true);
+        }
+        finally { if (created && File.Exists(temporary)) File.Delete(temporary); }
     }
 }

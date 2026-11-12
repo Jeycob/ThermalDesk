@@ -9,8 +9,9 @@ internal static class StartupManager
 {
     private const string TaskName = "ThermalDesk-AtSignIn";
     private static readonly string TaskTool = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "schtasks.exe");
-    internal static bool ShouldStartLive(Settings settings, string[] arguments, bool shiftHeld) =>
-        !shiftHeld && (arguments.Contains("--live-once") || settings.StartLiveAtSignIn && arguments.Contains("--startup"));
+    internal static bool ShouldStartLive(Settings settings, string[] arguments, bool shiftHeld, bool profileRecovered = false) =>
+        !shiftHeld && !profileRecovered && (arguments.Contains("--live-once") || settings.StartLiveAtSignIn && arguments.Contains("--startup"));
+    internal static bool ShouldStartMinimized(string[] arguments, bool profileRecovered) => arguments.Contains("--minimized") && !profileRecovered;
     internal static void WaitForPrevious(string[] arguments)
     {
         int index = Array.IndexOf(arguments, "--wait-for-process");

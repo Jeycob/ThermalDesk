@@ -53,6 +53,7 @@ internal sealed class FrameRenderer : IDisposable
         return (Bitmap)canvas.Clone();
     }
     internal static Color ParseColor(string value) => ColorTranslator.FromHtml("#" + value.TrimStart('#'));
+    internal static string FormatTemperature(double? value) => value.HasValue && double.IsFinite(value.Value) ? $"{value:0} °C" : "—";
     private static void DrawWidgets(Graphics g, Telemetry t, IEnumerable<LcdWidget> widgets)
     {
         foreach (var widget in widgets)
@@ -97,7 +98,7 @@ internal sealed class FrameRenderer : IDisposable
             using var ring = new Pen(Color.FromArgb(38, 218, 179), Math.Max(2, 4 * s));
             using var faint = new Pen(Color.FromArgb(36, 58, 73), Math.Max(1, 2 * s));
             using var title = new Font("Segoe UI", Math.Max(6, 22 * s), FontStyle.Bold);
-            using var number = new Font("Segoe UI", Math.Max(12, 78 * s), FontStyle.Bold);
+            using var number = new Font("Segoe UI", Math.Max(12, 68 * s), FontStyle.Bold);
             using var detail = new Font("Segoe UI", Math.Max(6, 30 * s));
             using var clock = new Font("Segoe UI", Math.Max(6, 27 * s), FontStyle.Bold);
             using var ink = new SolidBrush(Color.FromArgb(151, 172, 191));
@@ -109,15 +110,15 @@ internal sealed class FrameRenderer : IDisposable
             g.DrawArc(ring, 24 * s, cy - w / 2f + 24 * s, w - 48 * s, w - 48 * s, -90, (float)Math.Clamp(t.CpuTemperature ?? 0, 0, 100) * 3.6f);
             Center("THERMALDESK", title, teal, cy - 150 * s);
             Center("CPU TEMPERATURE", title, ink, cy - 100 * s);
-            Center(t.CpuTemperature.HasValue ? $"{t.CpuTemperature:0}°" : "—", number, Brushes.White, cy - 73 * s);
-            Center(t.GpuTemperature.HasValue ? $"GPU  {t.GpuTemperature:0} °C" : "GPU  —", detail, ink, cy + 44 * s);
+            Center(FormatTemperature(t.CpuTemperature), number, Brushes.White, cy - 73 * s);
+            Center("GPU  " + FormatTemperature(t.GpuTemperature), detail, ink, cy + 44 * s);
             Center($"MEMORY  {t.MemoryUsedPercent:0}%", title, ink, cy + 86 * s);
             Center(DateTime.Now.ToString("HH:mm:ss"), clock, teal, cy + 125 * s);
             return;
         }
         float scale = Math.Min(w / 480f, h / 128f);
         using var small = new Font("Segoe UI", Math.Max(8, 10 * scale));
-        using var large = new Font("Segoe UI", Math.Max(12, 29 * scale), FontStyle.Bold);
+        using var large = new Font("Segoe UI", Math.Max(12, 24 * scale), FontStyle.Bold);
         using var heading = new Font("Segoe UI", Math.Max(8, 9 * scale), FontStyle.Bold);
         using var muted = new SolidBrush(Color.FromArgb(144, 168, 186));
         using var accent = new SolidBrush(Color.FromArgb(38, 218, 179));
@@ -129,7 +130,7 @@ internal sealed class FrameRenderer : IDisposable
         {
             float x = cell * i + 16;
             g.DrawString(labels[i], small, muted, x, y);
-            g.DrawString(values[i].HasValue ? $"{values[i]:0}{(i == 2 ? "%" : "°")}" : "—", large, Brushes.White, x, y + 16 * scale);
+            g.DrawString(i == 2 ? (values[i].HasValue ? $"{values[i]:0}%" : "—") : FormatTemperature(values[i]), large, Brushes.White, x, y + 16 * scale);
             using var track = new SolidBrush(Color.FromArgb(33, 49, 65));
             g.FillRectangle(track, x, y + 59 * scale, cell - 28, 3);
             if (values[i].HasValue) g.FillRectangle(accent, x, y + 59 * scale, (float)Math.Clamp(values[i]!.Value / 100, 0, 1) * (cell - 28), 3);

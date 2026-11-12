@@ -231,3 +231,23 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
   missing pinned devices, sentinel values, loads, provenance and critical heat.
 - New mapping has not been physically accepted on the target. No live launch,
   sensor/hardware test, controller change, profile replacement or startup task.
+
+0.3.8 SOFTWARE-ONLY FOLLOW-UP
+- Cooling startup waits up to 20 seconds for fresh valid required temperatures
+  before opening the fan controller. The latest pending profile is evaluated;
+  no partial startup sample becomes synthetic control/smoothing history.
+- Mock tests cover delayed readiness with a Silent change, timeout, cancellation,
+  no controller opens/writes before readiness, and genuine critical heat as a
+  separate condition. Existing live settings tests keep one mock USB connection.
+- Malformed/null/oversized profile tests preserve the original and prior valid
+  backup. Recovery disables every hardware-control flag, automatic live launch
+  and minimized startup. A visible Preview warning/log identifies recovery.
+- Valid saves keep a previous valid profile; invalid profiles are preserved
+  separately before replacement. Bounded profile size is 1 MiB. Unreadable or
+  oversized originals are not implicitly overwritten. Tests use isolated files.
+- Built-in LCD dashboard labels now explicitly include Celsius, as custom widgets
+  already did. Round and wide default dashboards rendered at three-digit values.
+- Local core assertions: 928; UI/mock checks: 127; 200 repeat renders kept GDI
+  objects at 65 before/after. Remote verification is recorded with the release
+  artifacts. No physical fan, RGB, LCD or sensor tests; the
+  operator's running Silent session and startup registration remain untouched.

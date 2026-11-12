@@ -17,6 +17,14 @@ internal static class WidgetChecks
         void Check(bool value, string message) { count++; if (!value) throw new InvalidOperationException(message); }
         try
         {
+            Check(FrameRenderer.FormatTemperature(100) == "100 °C", "Built-in LCD dashboard shows explicit Celsius units");
+            Check(FrameRenderer.FormatTemperature(null) == "—" && FrameRenderer.FormatTemperature(double.NaN) == "—", "Built-in dashboard never formats missing or non-finite temperatures as valid data");
+            foreach (var size in new[] { (480, 128), (480, 480) })
+            {
+                using var renderer = new FrameRenderer();
+                using var image = renderer.Render(t with { CpuTemperature = 100, GpuTemperature = 115 }, new DisplaySettings(), size.Item1, size.Item2);
+                image.Save(Path.Combine(directory, $"dashboard-units-{size.Item1}x{size.Item2}.png"), ImageFormat.Png);
+            }
             foreach (var sample in new (WidgetSource Source, string Text, string Format)[]
             {
                 (WidgetSource.CpuTemperature, "CPU {value} °C", "0.0"), (WidgetSource.CpuMaximumTemperature, "CPU MAX {value} °C", "0.0"),
@@ -128,11 +136,37 @@ internal static class WidgetChecks
             catch (IOException e) { reportedReleaseFailure = e.Message.Contains("Could not restore") && e.Message.Contains("1"); }
             Check(reportedReleaseFailure && !releaseFailure.Duties.Contains(100), "Failed release is reported, never hidden by a fallback 100% write");
             int invalidOpens = 0;
-            var invalidStart = new Engine(_ => { invalidOpens++; return new TestController(); }, () => t with { Time = DateTimeOffset.UtcNow, CpuTemperature = null }, () => []);
+            var invalidStart = new Engine(_ => { invalidOpens++; return new TestController(); }, () => t with { Time = DateTimeOffset.UtcNow, CpuTemperature = null }, () => [], TimeSpan.FromMilliseconds(250));
             invalidStart.Start(cooling, true);
             SpinWait.SpinUntil(() => invalidStart.ControllerFault, 2000);
             Check(invalidStart.ControllerFault && invalidOpens == 0, "Unavailable initial CPU prevents hardware access instead of full-speed fallback");
+            Check(invalidStart.Status["Controller"].Contains("before fan USB access"), "Readiness timeout reports no fan ownership rather than claiming a release");
             Task.Run(async () => await invalidStart.Stop()).GetAwaiter().GetResult();
+            int delayedSamples = 0, delayedOpens = 0; var delayedController = new TestController();
+            var delayed = new Engine(_ => { Interlocked.Increment(ref delayedOpens); return delayedController; }, () =>
+            {
+                int sample = Interlocked.Increment(ref delayedSamples);
+                return t with { Time = DateTimeOffset.UtcNow, CpuTemperature = sample == 1 ? null : 50, GpuTemperature = 40 };
+            }, () => [], TimeSpan.FromSeconds(5));
+            delayed.Start(cooling, true);
+            Check(SpinWait.SpinUntil(() => Volatile.Read(ref delayedSamples) >= 1 && delayed.Status.TryGetValue("Controller", out var state) && state.StartsWith("Waiting"), 1500) && delayedOpens == 0,
+                "An initial timestamp without temperatures does not open the controller");
+            var pendingSilent = cooling.Copy(); pendingSilent.Ports[0].MinimumDuty = 30; FanPresets.Apply(pendingSilent.Ports[0], FanPreset.Silent); delayed.ApplyLiveSettings(pendingSilent);
+            Check(SpinWait.SpinUntil(() => Volatile.Read(ref delayedOpens) == 1 && delayedController.FirstDuty == 30 || delayed.ControllerFault, 6000) && !delayed.ControllerFault && delayedController.FirstDuty == 30,
+                "Driver readiness uses the latest pending Silent profile without an initial full-speed burst");
+            Check(delayedOpens == 1 && delayedSamples >= 2, "Readiness wait does not reconnect or repeatedly initialize USB");
+            Task.Run(async () => await delayed.Stop()).GetAwaiter().GetResult();
+            int cancelledOpens = 0;
+            var cancelledStartup = new Engine(_ => { Interlocked.Increment(ref cancelledOpens); return new TestController(); }, () => t with { Time = DateTimeOffset.UtcNow, CpuTemperature = null }, () => [], TimeSpan.FromSeconds(5));
+            cancelledStartup.Start(cooling, true);
+            Check(SpinWait.SpinUntil(() => cancelledStartup.Status.TryGetValue("Controller", out var state) && state.StartsWith("Waiting"), 1500), "Readiness wait is observable before cancellation");
+            Task.Run(async () => await cancelledStartup.Stop()).GetAwaiter().GetResult();
+            Check(cancelledOpens == 0 && !cancelledStartup.ControllerFault && !cancelledStartup.Running, "Stop during readiness opens no device and does not invent a fault or speed write");
+            int hotOpens = 0; var hotController = new TestController();
+            var hotStartup = new Engine(_ => { Interlocked.Increment(ref hotOpens); return hotController; }, () => t with { Time = DateTimeOffset.UtcNow, CpuTemperature = null, GpuTemperature = 90 }, () => [], TimeSpan.FromSeconds(2));
+            hotStartup.Start(cooling, true);
+            Check(SpinWait.SpinUntil(() => hotController.FirstDuty == 100, 1500) && hotOpens == 1, "Genuine fresh critical GPU heat is not confused with a missing-sensor fallback");
+            Task.Run(async () => await hotStartup.Stop()).GetAwaiter().GetResult();
             var conflict = new Engine(_ => throw new InvalidOperationException("Must not open a device"), () => t, () => ["TTRGBPlus"]);
             bool blocked = false; try { conflict.Start(rgbSettings, true); } catch (InvalidOperationException) { blocked = true; }
             Check(blocked && !conflict.Running, "Conflicting vendor process must block before device access.");
@@ -144,6 +178,13 @@ internal static class WidgetChecks
             Check(!StartupManager.ShouldStartLive(startup, ["--startup"], false), "Unarmed profile cannot auto-start hardware.");
             Check(StartupManager.ShouldStartLive(startup, ["--live-once"], false), "Explicit one-time live launch does not arm sign-in startup.");
             Check(!StartupManager.ShouldStartLive(startup, ["--live-once"], true), "Shift bypass also protects the explicit one-time launcher.");
+            Check(!StartupManager.ShouldStartLive(startup, ["--live-once"], false, true), "Recovered profile cannot be armed by a one-time startup flag");
+            startup.StartLiveAtSignIn = true;
+            Check(!StartupManager.ShouldStartLive(startup, ["--startup"], false, true), "Recovered profile cannot be armed by a scheduled sign-in launch");
+            Check(StartupManager.ShouldStartMinimized(["--minimized"], false) && !StartupManager.ShouldStartMinimized(["--minimized"], true), "Recovery warning cannot be hidden by a minimized sign-in flag");
+            string recoveredPath = Path.Combine(directory, "recovery-ui-profile.json");
+            File.WriteAllText(recoveredPath, "null"); var recovered = SettingsStore.LoadForStartup(recoveredPath);
+            using (var recoveryForm = new MainForm(recovered.Settings, recoveredPath, startupWarning: recovered.Warning)) count += recoveryForm.VerifyRecoveryUiForTest(Path.Combine(directory, "recovery-ui.png"));
             bool emptyBlocked = false;
             try { new Engine(_ => throw new Exception("No device should open"), () => t, () => []).Start(new Settings(), true); }
             catch (ArgumentException) { emptyBlocked = true; }
