@@ -6,7 +6,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>ThermalDesk</AssemblyName>
     <ApplicationIcon>Resources/ThermalDesk.ico</ApplicationIcon>
-    <Version>0.3.21</Version>
+    <Version>0.3.22</Version>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>

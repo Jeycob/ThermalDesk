@@ -91,7 +91,7 @@ internal sealed class MainForm : Form
         shell.Controls.Add(tools, 0, 1);
         session.AutoSize = false; session.Dock = DockStyle.Fill; session.AutoEllipsis = true; session.TextAlign = ContentAlignment.MiddleLeft;
         session.ForeColor = Muted; shell.Controls.Add(session, 0, 2);
-        var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(18, 8) };
+        var tabs = new ThemedTabControl { Dock = DockStyle.Fill, Padding = new Point(18, 8) };
         shell.Controls.Add(tabs, 0, 3);
         var dashboard = Page(tabs, "Overview");
         var layout = new BufferedTableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, Padding = new Padding(12) };
@@ -120,6 +120,14 @@ internal sealed class MainForm : Form
         color.Width = 100; serial.Width = 190;
         extras.Controls.AddRange([new Label { Text = "Default RGB color", AutoSize = true }, color, Button("Choose default…", PickColor), new Label { Text = "Controller serial (optional)", AutoSize = true }, serial]);
         extras.Controls.Add(new Label { Text = "Managed fans:", AutoSize = true });
+        extras.Controls.Add(Button("RGB schedule…", () =>
+        {
+            using var editor = new RgbScheduleForm(ReadSettings());
+            if (editor.ShowDialog(this) != DialogResult.OK) return;
+            settings.RgbScheduleEnabled = editor.Result.RgbScheduleEnabled;
+            settings.RgbScheduleEntries = editor.Result.RgbScheduleEntries;
+            QueueSettingsApply();
+        }));
         foreach (var preset in Enum.GetValues<FanPreset>()) extras.Controls.Add(Button(preset.ToString(), () => ApplyFanPreset(preset)));
         coolingLayout.Controls.Add(extras, 0, 3);
         var displays = Page(tabs, "Displays");
@@ -128,14 +136,14 @@ internal sealed class MainForm : Form
         displayLayout.RowStyles.Add(new(SizeType.Percent, 100)); displayLayout.RowStyles.Add(new(SizeType.Absolute, 68)); displays.Controls.Add(displayLayout);
         panelEditor = new("3.9-inch LCD · 264A:233D", settings.Panel, 480, 128, () => engine.Latest); aioEditor = new("TOUGHLIQUID AX · 264A:2328", settings.Aio, 480, 480, () => engine.Latest);
         displayLayout.Controls.Add(panelEditor, 0, 0); displayLayout.Controls.Add(aioEditor, 1, 0);
-        displayLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Muted, Text = "Images: JPEG, PNG, GIF, BMP / up to 25 MiB. GIF playback is capped at the display refresh rate.\nScreen mode sends the primary desktop to the LCD only when you explicitly start live control. No network server or cloud." }, 0, 1); displayLayout.SetColumnSpan(displayLayout.GetControlFromPosition(0, 1)!, 2);
+        displayLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Muted, Text = "Edit widgets: pages, gauges, graphs and online JPEG/PNG/MJPEG. Page 0 stays visible; other pages rotate.\nOnline sources fetch only in Live (up to four). Screen mirroring may show private information. No web server or cloud account." }, 0, 1); displayLayout.SetColumnSpan(displayLayout.GetControlFromPosition(0, 1)!, 2);
         var sensorsPage = Page(tabs, "Sensors");
         sensorSelector = new SensorSelector(initial.PreferredGpuId, () => engine.Latest, initial.AllowMonitoringOnly); sensorsPage.Controls.Add(sensorSelector); sensorSelector.SettingsChanged += QueueSettingsApply;
         var preferences = Page(tabs, "Settings");
         var preferenceLayout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(24) };
         preferences.Controls.Add(preferenceLayout);
         preferenceLayout.Controls.Add(new Label { Text = "Startup, profile and tray", AutoSize = true, ForeColor = Accent, Font = new Font(Font.FontFamily, 14, FontStyle.Bold), Margin = new Padding(0, 0, 0, 18) });
-        resumeLastProfile.Checked = initial.ResumeLastProfileOnLaunch ?? initial.StartLiveAtSignIn;
+        resumeLastProfile.Checked = initial.ResumeLastProfileOnLaunch ?? (initial.LastSessionWasLive || initial.StartLiveAtSignIn);
         preferenceLayout.Controls.Add(resumeLastProfile);
         preferenceLayout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(780, 0), ForeColor = Muted, Text = "Load and activate your saved devices when opening the app. Only previously configured outputs are used; this does not add Windows startup. Hold Shift or use --preview to open without hardware access. Recovery and conflicting controller apps still block automatic control.", Margin = new Padding(24, 4, 0, 22) });
         hints.SetToolTip(resumeLastProfile, "Applies on the next launch, not immediately. OFF keeps manual launches in Preview; Windows sign-in mode is configured separately. Your profile is always loaded and saved automatically.");
@@ -355,6 +363,10 @@ internal sealed class MainForm : Form
         var s = new Settings { PollSeconds = (int)poll.Value, PreferredGpuId = sensorSelector.Read(), CoolingEnabled = cooling.Checked, CoolingWiringConfirmed = wiring.Checked, RgbEnabled = rgb.Checked, MonitorFanController = monitorFans.Checked, StartLiveAtSignIn = settings.StartLiveAtSignIn, ResumeLastProfileOnLaunch = resumeLastProfile.Checked, ShowTechnicalDetails = technicalDetails.Checked, MinimizeAfterStartup = minimizeAfterStartup.Checked, MinimizeWhenClosed = minimizeWhenClosed.Checked, RgbColor = color.Text.Trim().TrimStart('#'), ControllerSerial = serial.Text.Trim(), Panel = panelEditor.Read(), Aio = aioEditor.Read() };
         s.ProcessMonitorEnabled = processMonitoring.Checked; s.ProcessSampleSeconds = (int)processInterval.Value; s.LogSampleSeconds = (int)logInterval.Value;
         s.AllowMonitoringOnly = sensorSelector.AllowMonitoringOnly;
+        s.LastSessionWasLive = settings.LastSessionWasLive;
+        s.ResumeLastProfileOnLaunch = resumeLastProfile.Checked ? true : settings.ResumeLastProfileOnLaunch.HasValue ? false : null;
+        s.RgbScheduleEnabled = settings.RgbScheduleEnabled;
+        s.RgbScheduleEntries = settings.RgbScheduleEntries.Select(e => new RgbScheduleEntry { Time = e.Time, Days = e.Days, BrightnessPercent = e.BrightnessPercent, Color = e.Color }).ToList();
         s.PowerEstimateExtraWatts = (double)powerExtra.Value; s.PowerEstimateEfficiencyPercent = (double)powerEfficiency.Value; s.PowerEstimateIncludesGpu = powerGpu.Checked;
         s.Ports = ports.Rows.Cast<DataGridViewRow>().Select(ReadPort).ToList(); s.Validate(); return s;
     }
@@ -395,6 +407,13 @@ internal sealed class MainForm : Form
             if (updating) { engine.ApplyLiveSettings(next); settings = next; return; }
         }
         await engine.Stop(); settings = next; engine.Start(next, live);
+        if (live)
+        {
+            // First successful, explicitly confirmed Live start opts into resume.
+            // An existing explicit opt-out is never replaced.
+            StartupManager.RememberSuccessfulLive(next); resumeLastProfile.Checked = next.ResumeLastProfileOnLaunch == true;
+            settings = next; SettingsStore.Save(configPath, next);
+        }
     });
     private void TrackSettingsChanges(Control control)
     {
@@ -461,9 +480,9 @@ internal sealed class MainForm : Form
         void Preview(PictureBox view, FrameRenderer renderer, DisplaySettings display, int height, ref string? oldKey, ref DisplaySettings? oldSettings)
         {
             if (!view.Visible) return;
-            var now = t with { Time = DateTimeOffset.Now }; string? key = FrameRenderer.VisualKey(now, display);
+            var now = t with { Time = DateTimeOffset.Now }; string? key = FrameRenderer.VisualKey(now, display, engine.OnlineMedia);
             if (view.Image is not null && key is not null && key == oldKey && ReferenceEquals(oldSettings, display)) return;
-            var next = renderer.Render(now, display, 480, height); var old = view.Image; view.Image = next; old?.Dispose(); oldKey = key; oldSettings = display;
+            var next = renderer.Render(now, display, 480, height, engine.OnlineMedia); var old = view.Image; view.Image = next; old?.Dispose(); oldKey = key; oldSettings = display;
         }
         try { Preview(panelPreview, panelRenderer, settings.Panel, 128, ref panelPreviewKey, ref panelPreviewSettings); } catch (Exception e) { sessionText += " · panel preview: " + e.Message; }
         try { Preview(aioPreview, aioRenderer, settings.Aio, 480, ref aioPreviewKey, ref aioPreviewSettings); } catch (Exception e) { sessionText += " · AIO preview: " + e.Message; }
@@ -545,6 +564,9 @@ internal sealed class MainForm : Form
                 var candidate = SettingsStore.LoadForImport(d.FileName, settings.StartLiveAtSignIn, settings.ResumeLastProfileOnLaunch);
                 string summary = $"Load {Path.GetFileName(d.FileName)}?\n\nCooling: {(candidate.CoolingEnabled ? "enabled" : "disabled")} · configured ports: {candidate.Ports.Count(p => p.Mode != ControlMode.Preserve)}\nRGB: {(candidate.RgbEnabled ? "enabled" : "disabled")}\n3.9-inch LCD: {(candidate.Panel.Enabled ? "enabled" : "disabled")} · AX LCD: {(candidate.Aio.Enabled ? "enabled" : "disabled")}\n\nReplaces this window's settings immediately. A dated backup is kept. Windows startup is unchanged.\n" +
                     (engine.Live && engine.Running ? "Compatible changes apply in the existing Live session. Different cooling ownership/wiring is blocked; Stop first for those changes." : "Does not start hardware. Review the settings, then choose Start live control when ready.");
+                int onlineCount = OnlineMediaPolicy.Sources(candidate).Select(OnlineMediaPolicy.Key).Distinct().Count();
+                if (onlineCount > 0) summary += $"\n\nOnline sources: {onlineCount}. Live mode will make HTTP(S) requests to URLs from this profile. Import trusted profiles only.";
+                if (candidate.RgbScheduleEnabled) summary += "\n\nRGB schedule enabled: local PC time; may dim/turn off managed lighting.";
                 if (MessageBox.Show(this, summary, "Import profile", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
                 string backup = ImportProfile(d.FileName);
                 Info("Profile loaded into this window and saved. No restart is needed.\n\n" + (engine.Live ? "Applied to the existing Live session without reconnecting the fan controller." : "Hardware was not started. Review Displays and Cooling + RGB, then choose Start live control.") + "\n\nPrevious profile backup:\n" + backup);
@@ -895,7 +917,7 @@ internal sealed class MainForm : Form
         finally { smokeMode = true; settingsDelay.Stop(); Hide(); }
     }
     protected override void Dispose(bool disposing)
-    { if (disposing) { startupMenu?.Dispose(); profileMenu?.Dispose(); settingsDelay.Dispose(); refresh.Dispose(); tray.ContextMenuStrip?.Dispose(); tray.Dispose(); panelRenderer.Dispose(); aioRenderer.Dispose(); panelPreview.Image?.Dispose(); aioPreview.Image?.Dispose(); hints.Dispose(); appIcon.Dispose(); } base.Dispose(disposing); }
+    { if (disposing) { if (!engine.Running) engine.OnlineMedia.Dispose(); startupMenu?.Dispose(); profileMenu?.Dispose(); settingsDelay.Dispose(); refresh.Dispose(); tray.ContextMenuStrip?.Dispose(); tray.Dispose(); panelRenderer.Dispose(); aioRenderer.Dispose(); panelPreview.Image?.Dispose(); aioPreview.Image?.Dispose(); hints.Dispose(); appIcon.Dispose(); } base.Dispose(disposing); }
 }
 
 internal sealed class DisplayEditor : GroupBox
@@ -908,6 +930,8 @@ internal sealed class DisplayEditor : GroupBox
     private readonly TextBox path = new();
     private readonly NumericUpDown brightness = new() { Minimum = 0, Maximum = 100 };
     private readonly NumericUpDown frames = new() { Minimum = 1, Maximum = 10 };
+    private readonly CheckBox cycle = new() { Text = "Rotate widget pages", AutoSize = true };
+    private readonly NumericUpDown cycleSeconds = new() { Minimum = 1, Maximum = 3600 };
     private readonly Label connection = new() { Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.Silver, Text = "Offline editor · hardware is opened only in a live session" };
     private readonly Panel scroll = new() { Dock = DockStyle.Fill, AutoScroll = true };
     private readonly Button editWidgets = new() { Text = "Edit widgets…", AutoSize = true, FlatStyle = FlatStyle.Flat };
@@ -919,9 +943,9 @@ internal sealed class DisplayEditor : GroupBox
     {
         design = s.Copy();
         Text = title; Dock = DockStyle.Fill; ForeColor = Color.White; Padding = new Padding(16); Margin = new Padding(5);
-        var grid = new BufferedTableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 12 };
+        var grid = new BufferedTableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 14 };
         grid.ColumnStyles.Add(new(SizeType.Absolute, 115)); grid.ColumnStyles.Add(new(SizeType.Percent, 100));
-        for (int row = 0; row < 12; row++) grid.RowStyles.Add(new(SizeType.Absolute, row == 11 ? 60 : row == 2 ? 46 : 38));
+        for (int row = 0; row < 14; row++) grid.RowStyles.Add(new(SizeType.Absolute, row == 13 ? 60 : row == 2 ? 46 : 38));
         Controls.Add(scroll); scroll.Controls.Add(grid);
         content.Items.AddRange(Enum.GetNames<DisplayContent>()); rotation.Items.AddRange(["0", "90", "180", "270"]);
         enabled.Checked = s.Enabled; overlay.Checked = s.Overlay; custom.Checked = s.UseCustomLayout; content.SelectedItem = s.Content.ToString(); rotation.SelectedItem = s.Rotation.ToString(); brightness.Value = s.Brightness; frames.Value = s.FramesPerSecond; path.Text = s.MediaPath;
@@ -940,7 +964,10 @@ internal sealed class DisplayEditor : GroupBox
         browse.Click += (_, _) => { using var d = new OpenFileDialog { Filter = "Images|*.jpg;*.jpeg;*.png;*.gif;*.bmp" }; if (d.ShowDialog() == DialogResult.OK) { path.Text = d.FileName; content.SelectedItem = "Image"; } };
         grid.Controls.Add(browse, 1, 9);
         grid.Controls.Add(custom, 1, 10);
-        grid.Controls.Add(connection, 0, 11); grid.SetColumnSpan(connection, 2);
+        cycle.Checked = s.RotateWidgetGroups; cycleSeconds.Value = s.WidgetGroupSeconds;
+        grid.Controls.Add(cycle, 0, 11); grid.SetColumnSpan(cycle, 2);
+        grid.Controls.Add(new Label { Text = "Page seconds", AutoSize = true }, 0, 12); grid.Controls.Add(cycleSeconds, 1, 12);
+        grid.Controls.Add(connection, 0, 13); grid.SetColumnSpan(connection, 2);
         editWidgets.Click += (_, _) =>
         {
             try
@@ -986,6 +1013,8 @@ internal sealed class DisplayEditor : GroupBox
         hints.SetToolTip(frames, "LCD refresh rate. 1–2 FPS is sufficient for temperatures and uses less CPU/USB bandwidth than 10 FPS.");
         hints.SetToolTip(overlay, "Draw sensor widgets over Image/Screen content. Dashboard always displays its widgets.");
         hints.SetToolTip(custom, "Use your editable widgets instead of the built-in dashboard layout.");
+        hints.SetToolTip(cycle, "Assign Page 1, 2… in Edit widgets. Pages rotate; Page 0 stays visible. Disabled rotation shows all widgets. No controller reconnect or fan changes.");
+        hints.SetToolTip(cycleSeconds, "Seconds per page (1–3600); 5 is a good start. Independent for each LCD. The editor keeps the selected widget's page visible.");
         foreach (Control label in grid.Controls.OfType<Label>())
         {
             var position = grid.GetPositionFromControl(label);
@@ -1002,6 +1031,7 @@ internal sealed class DisplayEditor : GroupBox
             // Do not reframe freshly designed portrait widgets a second time.
             rotation.SelectedItem = design.Rotation.ToString(CultureInfo.InvariantCulture);
             content.SelectedItem = design.Content.ToString();
+            cycle.Checked = design.RotateWidgetGroups; cycleSeconds.Value = design.WidgetGroupSeconds;
             custom.Checked = true; overlay.Checked = true;
         }
         finally { acceptingLayout = false; }
@@ -1039,7 +1069,8 @@ internal sealed class DisplayEditor : GroupBox
     }
     public DisplaySettings Read()
     {
-        var result = design.Copy(); result.Enabled = enabled.Checked; result.Content = Enum.Parse<DisplayContent>((string)content.SelectedItem!); result.MediaPath = path.Text.Trim(); result.Brightness = (int)brightness.Value; result.FramesPerSecond = (int)frames.Value; result.Rotation = int.Parse((string)rotation.SelectedItem!, CultureInfo.InvariantCulture); result.Overlay = overlay.Checked; result.UseCustomLayout = custom.Checked; return result;
+        var result = design.Copy(); result.Enabled = enabled.Checked; result.Content = Enum.Parse<DisplayContent>((string)content.SelectedItem!); result.MediaPath = path.Text.Trim(); result.Brightness = (int)brightness.Value; result.FramesPerSecond = (int)frames.Value; result.Rotation = int.Parse((string)rotation.SelectedItem!, CultureInfo.InvariantCulture); result.Overlay = overlay.Checked; result.UseCustomLayout = custom.Checked;
+        result.RotateWidgetGroups = cycle.Checked; result.WidgetGroupSeconds = (int)cycleSeconds.Value; return result;
     }
     public void LoadProfile(DisplaySettings value)
     {
@@ -1049,6 +1080,7 @@ internal sealed class DisplayEditor : GroupBox
             design = value.Copy(); enabled.Checked = value.Enabled; overlay.Checked = value.Overlay;
             content.SelectedItem = value.Content.ToString(); rotation.SelectedItem = value.Rotation.ToString(CultureInfo.InvariantCulture);
             brightness.Value = value.Brightness; frames.Value = value.FramesPerSecond; path.Text = value.MediaPath; custom.Checked = value.UseCustomLayout;
+            cycle.Checked = value.RotateWidgetGroups; cycleSeconds.Value = value.WidgetGroupSeconds;
         }
         finally { acceptingLayout = false; }
     }

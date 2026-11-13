@@ -5,7 +5,7 @@ Native UI. No browser, cloud account or LibHWInfo process.
 
 ## Install and start
 
-1. Run **ThermalDesk-0.3.21-Setup-x64.exe**, or extract the portable ZIP.
+1. Run a published **ThermalDesk Setup-x64.exe**, or extract the portable ZIP.
 2. Approve the administrator prompt; some CPU sensors need it.
 3. Open **Sensors** and check that the correct CPU/GPU and readings appear.
 4. Configure outputs in **Displays** and **Cooling + RGB**.
@@ -25,6 +25,9 @@ apply without Stop / Start. Changing controller ownership or wiring still needs 
   devices next time you open the app. It does not add Windows startup.
 - Older profiles already armed for Live at sign-in inherit resume behavior.
   New, unarmed profiles stay in Preview.
+- After your first confirmed **Start live control**, the app remembers that
+  profile for the next launch. An explicit resume opt-out stays off. A minimized
+  launch can resume when you explicitly enabled it. Imports never authorize Live.
 - **Start at sign-in** separately configures disabled, Preview, or elevated Live
   startup. Installation does not enable it for a new user.
 - Hold **Shift**, or run `ThermalDesk.exe --preview --show-window`, to bypass
@@ -47,6 +50,14 @@ keeps a selected port dark; disabling the global master releases lighting contro
 LED count must match connected lighting; it is not a fan-speed setting.
 Hover over controls for explanations.
 
+**Cooling + RGB → RGB schedule…** adds timed lighting. Try **Night preset**:
+08:00 restores port brightness, 22:00 makes the managed ports dark. Times use the
+PC's local clock. Choose every day, weekdays or weekend. Each entry stays active
+until the next one, even across midnight or a restart. Brightness is a percentage
+of the port's configured brightness; an optional color selects static lighting.
+Global RGB OFF and explicit port OFF take priority. The schedule never changes
+fan speeds, pump settings or unselected RGB ports.
+
 Do not run TT RGB Plus, OpenRGB, Fan Control or SignalRGB against the same USB
 controller. Conflicts block control; ThermalDesk does not kill apps.
 
@@ -60,6 +71,42 @@ temperatures still use the emergency policy. Verify physical operation.
 Open **Displays → Edit widgets**. Choose a horizontal, vertical or round layout,
 then edit size, font, color, source and gauge/graph style. Both displays have
 independent settings and rotation.
+
+### Rotate widgets / pages
+
+1. Select a widget and choose **Copy to next page** in the designer.
+2. Change the copy's source or appearance. It uses the same position on another page.
+3. Apply the layout. Under **Displays**, choose **Page seconds** (default 5).
+
+**Page 0** is always visible. Pages 1–16 rotate as groups, so several widgets can
+appear together. Assign pages directly in **Content → Page (0 = always)**.
+The designer keeps the selected page visible. Disabling rotation shows all widgets.
+This changes LCD rendering only; it does not reconnect the cooling controller.
+
+### Online image / webcam
+
+In **Edit widgets → Add widget**, select **Online image / webcam**. Under
+**Online image**, enter a direct HTTP(S) image URL and choose:
+
+- **Snapshot:** JPEG/PNG, polled at your chosen interval. Start with 5–30 seconds.
+- **Mjpeg:** a multipart MJPEG stream. Decode 1–5 FPS (default 2); set the LCD's
+  separate **Frames / sec** value accordingly. Intermediate frames are discarded.
+
+**Contain** shows the full image; **Cover** fills the widget by cropping. Rounded
+corners are configurable. The last frame is marked when stale or disconnected.
+Preview never makes network requests; fetching starts only in Live. Use Dashboard
+with a custom layout, or enable the custom overlay over Image/Screen content.
+
+This is not a web browser: webpages, YouTube, RTSP and HLS are not supported.
+Redirects, cookies, proxy authentication and passwords embedded in URLs are not
+supported. Use a direct trusted camera endpoint. HTTPS certificates are verified;
+HTTP is unencrypted. URLs are stored in your local profile, so protect exports
+that contain private query tokens. A source receives normal HTTP requests; photos
+are not uploaded elsewhere and no network server is opened.
+
+Limits: four distinct sources across both LCDs; JPEG/PNG up to 4 MiB and 4 MP;
+one retained, downscaled frame per source. MJPEG reads are limited to about
+2 MiB/s per source with reconnect backoff. No FFmpeg process or browser runtime.
 
 - Sources include temperatures, clocks, VRAM, load, fans and power.
 - **Observed last 24h energy** accumulates sampled power, not watts multiplied by
@@ -97,6 +144,10 @@ For low overhead, leave optional process monitoring off unless needed. Longer
 process/log intervals reduce work. Hidden UI refresh slows down automatically;
 control sampling is unchanged. Technical thread/handle counters are opt-in.
 Log reads and histories are bounded; there are no full-log background scans.
+Unchanged LCD content reuses its JPEG; hidden rotation pages are not rendered.
+Disabled LCD workers wake once per second rather than four times. RGB schedules
+are resolved once per minute or profile change, not for every LED animation frame.
+Network clients are created lazily; unused online widgets add no network handles.
 
 ## Troubleshooting
 
@@ -123,5 +174,8 @@ dotnet publish src/ThermalDesk.App -c Release -r win-x64 --self-contained true -
 ```
 
 Core and widget checks use fixtures/mock devices, not physical USB control.
+Failed core checks print `FAIL` and exit with code 1 instead of leaving an
+unhandled .NET exception / Windows error dialog. `--verify-error-reporting` is an
+intentional failing-runner check, not the normal test command.
 See [VALIDATION.txt](VALIDATION.txt) for test evidence and limitations.
 GPL-3.0-or-later; see [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).

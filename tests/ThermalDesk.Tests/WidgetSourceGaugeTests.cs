@@ -67,7 +67,7 @@ internal static class WidgetSourceGaugeTests
             var copy = display.Copy().Widgets.Single();
             check(copy.Kind == kind && copy.Source == WidgetSource.GpuVramUsedPercent && copy.GaugeSegments == 20 && copy.GaugeTextColor == "FFFFFF", "New gauge kind persists: " + kind);
             check(WidgetLayout.GaugeFraction(widget, t) == .5, "Gauge shared value normalization: " + kind);
-            if (kind == WidgetKind.Text) continue;
+            if (!WidgetLayout.IsGauge(kind) && !WidgetLayout.IsGraph(kind)) continue;
             widget.Source = WidgetSource.Clock;
             bool rejected = false; try { WidgetLayout.Validate(display, 480, 480); } catch (ArgumentException) { rejected = true; }
             check(rejected, "Non-numeric source rejected for " + kind);

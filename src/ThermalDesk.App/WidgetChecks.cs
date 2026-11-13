@@ -53,6 +53,7 @@ internal static class WidgetChecks
             count += NewWidgetChecks.Run(directory);
             count += LogAndPerformanceChecks.Run(directory);
             count += PowerGraphChecks.Run(directory);
+            count += PresentationChecks.Run(directory);
             foreach (var shape in new[] { (Width: 480, Height: 128), (Width: 480, Height: 480) })
             {
                 using var editor = new DisplayEditor("Offline preset checks", new DisplaySettings { Brightness = 43, FramesPerSecond = 3 }, shape.Width, shape.Height, () => t);

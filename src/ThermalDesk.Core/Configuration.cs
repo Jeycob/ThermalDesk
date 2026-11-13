@@ -120,6 +120,8 @@ public sealed class DisplaySettings
     public bool UseCustomLayout { get; set; }
     public string BackgroundColor { get; set; } = "0A111D";
     public List<LcdWidget> Widgets { get; set; } = [];
+    public bool RotateWidgetGroups { get; set; }
+    public int WidgetGroupSeconds { get; set; } = 5;
     public DisplaySettings Copy() => JsonSerializer.Deserialize<DisplaySettings>(JsonSerializer.Serialize(this, Settings.JsonOptions), Settings.JsonOptions)!;
 }
 public sealed class Settings
@@ -136,6 +138,7 @@ public sealed class Settings
     // Older explicitly armed sign-in profiles may resume on manual launch too.
     // New/unarmed profiles remain Preview until the user opts in.
     public bool? ResumeLastProfileOnLaunch { get; set; }
+    public bool LastSessionWasLive { get; set; }
     public bool ShowTechnicalDetails { get; set; }
     // Null preserves --minimized behavior for profiles from older releases.
     // Once the user selects either state, that explicit choice wins over old task arguments.
@@ -148,6 +151,8 @@ public sealed class Settings
     public double PowerEstimateEfficiencyPercent { get; set; } = 90;
     public bool PowerEstimateIncludesGpu { get; set; } = true;
     public string RgbColor { get; set; } = "23D6BA";
+    public bool RgbScheduleEnabled { get; set; }
+    public List<RgbScheduleEntry> RgbScheduleEntries { get; set; } = [];
     public string ControllerSerial { get; set; } = "";
     public DisplaySettings Panel { get; set; } = new();
     public DisplaySettings Aio { get; set; } = new();
@@ -173,6 +178,7 @@ public sealed class Settings
         if (Ports.Count != 5 || !Ports.Select(p => p.Port).Order().SequenceEqual(Enumerable.Range(1, 5)))
             throw new ArgumentException("Exactly five distinct controller ports (1–5) are required.");
         if (RgbColor.Length != 6 || !RgbColor.All(Uri.IsHexDigit)) throw new ArgumentException("RGB color must be six hexadecimal digits.");
+        RgbSchedule.Validate(this);
         if (RgbEnabled && !Ports.Any(Lighting.IsManaged))
             throw new ArgumentException("Select at least one RGB port for ON or explicit OFF, or disable the global RGB master.");
         foreach (var p in Ports)
@@ -208,6 +214,8 @@ public sealed class Settings
         }
         WidgetLayout.Validate(Panel, 480, 128);
         WidgetLayout.Validate(Aio, 480, 480);
+        if (OnlineMediaPolicy.Sources(this).Select(OnlineMediaPolicy.Key).Distinct().Count() > OnlineMediaPolicy.MaxSources)
+            throw new ArgumentException("At most four different online sources can be active across both LCDs.");
         if (CoolingEnabled && (!CoolingWiringConfirmed || Ports.All(p => p.Mode == ControlMode.Preserve)))
             throw new ArgumentException("Cooling requires confirmed wiring and at least one configured port.");
         // The saved sign-in preference is independent of the current output
@@ -247,6 +255,7 @@ public static class SettingsStore
         // A transferred profile cannot silently enable or disable this PC's startup preference.
         result.StartLiveAtSignIn = keepLiveAtSignIn;
         result.ResumeLastProfileOnLaunch = keepResumeOnLaunch;
+        result.LastSessionWasLive = false; // Import is never a new live-start authorization.
         return result;
     }
     public static string BackupBeforeImport(string path, Settings current)

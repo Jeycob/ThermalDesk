@@ -10,12 +10,19 @@ public enum WidgetSource { Text, CpuTemperature, GpuTemperature, GpuHotSpotTempe
     CpuEnergyLast24hKwh, GpuEnergyLast24hKwh, EstimatedTotalEnergyLast24hKwh }
 public enum WidgetAlignment { Left, Center, Right }
 // Append new values: old saved numeric or named profiles retain their original meaning.
-public enum WidgetKind { Text, RadialGauge, HorizontalGauge, VerticalGauge, RadialSegments, RadialNeedle, RadialRing, RadialSemicircle, LineGraph, BarGraph }
+public enum WidgetKind { Text, RadialGauge, HorizontalGauge, VerticalGauge, RadialSegments, RadialNeedle, RadialRing, RadialSemicircle, LineGraph, BarGraph, OnlineImage }
 
 public sealed class LcdWidget
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Widget";
+    public int Group { get; set; }
+    public string OnlineUrl { get; set; } = "";
+    public OnlineMediaMode OnlineMode { get; set; }
+    public int OnlineRefreshSeconds { get; set; } = 5;
+    public int OnlineMaxFps { get; set; } = 2;
+    public ImageFit ImageFit { get; set; } = ImageFit.Contain;
+    public int CornerRadius { get; set; } = 8;
     public WidgetSource Source { get; set; } = WidgetSource.CpuTemperature;
     public WidgetKind Kind { get; set; }
     public double GaugeMinimum { get; set; }
@@ -76,7 +83,7 @@ public static class WidgetLayout
         }
     }
     public static bool IsGraph(WidgetKind kind) => kind is WidgetKind.LineGraph or WidgetKind.BarGraph;
-    public static bool IsGauge(WidgetKind kind) => kind != WidgetKind.Text && !IsGraph(kind);
+    public static bool IsGauge(WidgetKind kind) => kind is not (WidgetKind.Text or WidgetKind.OnlineImage) && !IsGraph(kind);
     public static bool IsNumeric(WidgetSource source) => source is not (WidgetSource.Text or WidgetSource.Clock or WidgetSource.Date or WidgetSource.TopCpuProcess or WidgetSource.TopGpuProcess) && !LogWidget.IsLog(source);
     public static bool IsRadial(WidgetKind kind) => kind is WidgetKind.RadialGauge or WidgetKind.RadialSegments or WidgetKind.RadialNeedle or WidgetKind.RadialRing or WidgetKind.RadialSemicircle;
     public static void Reframe(DisplaySettings display, int oldWidth, int oldHeight, int newWidth, int newHeight)
@@ -96,6 +103,7 @@ public static class WidgetLayout
         ((transparent && color.Length == 0) || color.TrimStart('#') is { Length: 6 } hex && hex.All(Uri.IsHexDigit));
     public static void Validate(DisplaySettings display, int physicalWidth, int physicalHeight)
     {
+        if (display.WidgetGroupSeconds is < 1 or > 3600) throw new ArgumentException("Widget rotation interval must be 1–3600 seconds.");
         if (!IsColor(display.BackgroundColor) || display.Widgets is null || display.Widgets.Count > 40)
             throw new ArgumentException("Invalid LCD background or more than 40 widgets.");
         var (width, height) = Canvas(display, physicalWidth, physicalHeight);
@@ -106,6 +114,10 @@ public static class WidgetLayout
                 throw new ArgumentException("Widgets need unique IDs and a short name.");
             if (!Enum.IsDefined(w.Source) || !Enum.IsDefined(w.Alignment) || !Enum.IsDefined(w.Kind) || w.Port is < 1 or > 5)
                 throw new ArgumentException($"{w.Name}: invalid data source, alignment or fan port.");
+            if (w.Group is < 0 or > 16 || w.CornerRadius is < 0 or > 60 || w.OnlineUrl is null ||
+                !Enum.IsDefined(w.OnlineMode) || !Enum.IsDefined(w.ImageFit) || w.OnlineRefreshSeconds is < 1 or > 3600 || w.OnlineMaxFps is < 1 or > 5)
+                throw new ArgumentException($"{w.Name}: group must be 0–16, corners 0–60 px and online refresh 1–3600 seconds.");
+            if (w.Kind == WidgetKind.OnlineImage && w.OnlineUrl.Length > 0) _ = OnlineMediaPolicy.Parse(w.OnlineUrl);
             if (w.X < 0 || w.Y < 0 || w.Width < 8 || w.Height < 8 || w.Width > width || w.Height > height || w.X > width - w.Width || w.Y > height - w.Height)
                 throw new ArgumentException($"{w.Name}: widget must stay inside the {width}×{height} design canvas (before rotation).");
             if (!float.IsFinite(w.FontSize) || w.FontSize is < 6 or > 120 || string.IsNullOrWhiteSpace(w.FontFamily) || w.FontFamily.Length > 100)

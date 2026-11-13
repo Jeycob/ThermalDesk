@@ -611,3 +611,40 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
 - Evidence: work/thermaldesk-0.3.21-checks/final3 and preview-performance.json.
   No real controller, LCD, RGB, fan, pump, driver or remote process was changed.
 
+2026-11-13 / 0.3.22 pages, online images and RGB schedule
+- LCD widget groups 1-16 rotate at a configurable 1-3600 second interval; group 0
+  stays visible. Sparse groups, wraparound, exact boundaries and profile copies
+  tested. Actual pixel changes and JPEG-cache invalidation checked. Designer
+  copy-to-next-page and Undo preserve placement/identity and whole layout state.
+- Direct JPEG/PNG polling and multipart MJPEG latest-frame widgets; no WebView,
+  FFmpeg, shell commands, browser or network server. Offline mock HTTP handlers
+  tested snapshots, one-byte MJPEG chunk boundaries, errors without URL leaks,
+  cancellation/bitmap release, byte/dimension caps and 100 bitmap replacements.
+  No real camera/network or physical LCD acceptance was performed.
+- Four deduplicated sources maximum; four MiB/four MP cap, 480px cached frame,
+  1-5 FPS MJPEG decoding and approx 2 MiB/s per source read cap. Reconnect backs
+  off. Preview does not fetch; the shared HTTP client is lazy. URLs use HTTP(S)
+  only; no embedded credentials, redirects, cookies, proxies or TLS bypass.
+- Local-time RGB schedule, weekday/weekend filtering, midnight/restart carryover,
+  explicit OFF priority and port brightness scaling. Global master and managed
+  ports still gate writes. Fan parameters and cooling safety code are unchanged.
+  Schedule resolution cached per minute/profile; no scheduler thread per port.
+- Confirmed Live startup remembers/resumes the saved profile by default, with
+  explicit opt-out preserved. Shift, --preview, recovery and no selected outputs
+  still block automatic Live. Profile import does not create authorization.
+- Native owner-drawn tab headers, rounded widget/image backgrounds, concise
+  help text and page-copy action. No animation timer or global compositing layer.
+- Disabled LCD wake cadence reduced from 250ms to 1s. Existing frame/font/JPEG
+  reuse remains active. No forced GC, priority manipulation or arbitrary thread cap.
+- Core runner catches failures, reports FAIL and exits 1. Intentional
+  --verify-error-reporting check returned 1 instead of an unhandled managed crash.
+- Release build: zero warnings/errors. Core: 1667 assertions passed. Offline
+  UI/widget suite: 1002 checks, 200 render iterations, GDI 80 -> 79 in final run.
+- Local 20.3s mock two-LCD loop run (up to 10 FPS, unchanged-frame JPEG reuse):
+  mean 0.323% total CPU on 16 logical processors, approx 56.6-60.6 MiB working
+  set, 13-15 threads, 293-296 handles. Allocated 1.26 MiB after warmup. This is
+  not a real USB/sensor/webcam or long-term leak benchmark, nor a controlled
+  before/after speedup claim. Optional network widgets add their own workload.
+- Evidence: work/thermaldesk-0322-complete, thermaldesk-0322-checks-final/
+  display-benchmark.json. Not installed on Sklenik; no live fan/RGB/LCD modified.
+

@@ -2,6 +2,9 @@ using System.Buffers.Binary;
 using System.Text;
 using ThermalDesk.Core;
 
+try
+{
+if (args.Contains("--verify-error-reporting")) throw new InvalidOperationException("Intentional test-runner error-reporting check.");
 int tests = 0;
 void Check(bool value, string name) { tests++; if (!value) throw new Exception("FAILED: " + name); }
 void Throws(Action a, string name) { try { a(); } catch (ArgumentException) { Check(true, name); return; } throw new Exception("FAILED: " + name); }
@@ -360,9 +363,16 @@ LogMetricsTests.Run(Check);
 PowerAndGraphTests.Run(Check);
 DailyEnergyTests.Run(Check);
 RollingEnergyTests.Run(Check);
+PresentationTests.Run(Check);
 if (args.Length == 1)
 {
     var supplied = SettingsStore.LoadForImport(Path.GetFullPath(args[0]), false);
     Check(supplied.Ports.Count == 5 && !supplied.StartLiveAtSignIn, "supplied recovery profile validates without enabling automatic live startup");
 }
 Console.WriteLine($"PASS: {tests} assertions. Hardware-independent tests; no USB device was opened.");
+}
+catch (Exception error)
+{
+    Console.Error.WriteLine("FAIL: " + error);
+    Environment.ExitCode = 1;
+}

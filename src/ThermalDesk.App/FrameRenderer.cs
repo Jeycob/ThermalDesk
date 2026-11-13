@@ -45,11 +45,12 @@ internal sealed class FrameRenderer : IDisposable
     }
     // Equality key describes visible values, not telemetry timestamps. Physical LCD
     // keepalives/transfers remain unchanged; only duplicate rendering/JPEG is skipped.
-    internal static string? VisualKey(Telemetry telemetry, DisplaySettings settings)
+    internal static string? VisualKey(Telemetry telemetry, DisplaySettings settings, OnlineMediaCache? online = null)
     {
         if (settings.Content != DisplayContent.Dashboard) return null; // live capture / animated media must advance
         if (!settings.UseCustomLayout) return $"{telemetry.CpuTemperature:R}|{telemetry.GpuTemperature:R}|{telemetry.MemoryUsedPercent:R}|{DateTime.Now:yyyyMMddHHmmss}";
-        return string.Join('\u001f', settings.Widgets.Select(w => WidgetLayout.Format(w, telemetry) +
+        return WidgetRotation.ActiveGroup(settings, telemetry.Time) + "|" + string.Join('\u001f', WidgetRotation.Visible(settings, telemetry.Time).Select(w =>
+            (w.Kind == WidgetKind.OnlineImage ? "image:" + (online?.Revision(w) ?? 0) + ":age:" + telemetry.Time.ToUnixTimeSeconds() / 5 : WidgetLayout.Format(w, telemetry)) +
             (WidgetLayout.IsGauge(w.Kind) ? "|" + WidgetLayout.GaugeFraction(w, telemetry)?.ToString("R", System.Globalization.CultureInfo.InvariantCulture) : "") +
             (WidgetLayout.IsGraph(w.Kind) ? "|history:" + telemetry.History.Revision : "")));
     }
@@ -59,7 +60,7 @@ internal sealed class FrameRenderer : IDisposable
         jpegBuffer.SetLength(0); jpegBuffer.Position = 0;
         bitmap.Save(jpegBuffer, JpegCodec, jpegParameters); return jpegBuffer.ToArray();
     }
-    public Bitmap Render(Telemetry t, DisplaySettings settings, int width, int height)
+    public Bitmap Render(Telemetry t, DisplaySettings settings, int width, int height, OnlineMediaCache? online = null)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         int w = settings.Rotation is 90 or 270 ? height : width, h = settings.Rotation is 90 or 270 ? width : height;
@@ -101,7 +102,7 @@ internal sealed class FrameRenderer : IDisposable
             }
             if (settings.Content == DisplayContent.Dashboard || settings.Overlay)
             {
-                if (settings.UseCustomLayout) DrawWidgets(g, t, settings.Widgets);
+                if (settings.UseCustomLayout) DrawWidgets(g, t, WidgetRotation.Visible(settings, t.Time), online);
                 else DrawMetrics(g, t, w, h, settings.Content != DisplayContent.Dashboard);
             }
         }
@@ -112,7 +113,7 @@ internal sealed class FrameRenderer : IDisposable
     }
     internal static Color ParseColor(string value) => ColorTranslator.FromHtml("#" + value.TrimStart('#'));
     internal static string FormatTemperature(double? value) => value.HasValue && double.IsFinite(value.Value) ? $"{value:0} °C" : "—";
-    private void DrawWidgets(Graphics g, Telemetry t, IEnumerable<LcdWidget> widgets)
+    private void DrawWidgets(Graphics g, Telemetry t, IEnumerable<LcdWidget> widgets, OnlineMediaCache? online)
     {
         foreach (var widget in widgets)
         {
@@ -121,7 +122,23 @@ internal sealed class FrameRenderer : IDisposable
             {
                 var box = new Rectangle(widget.X, widget.Y, widget.Width, widget.Height);
                 g.SetClip(box);
+                if (widget.CornerRadius > 0 && (widget.Background.Length > 0 || widget.Kind == WidgetKind.OnlineImage))
+                { using var shape = Rounded(box, widget.CornerRadius); g.SetClip(shape, CombineMode.Intersect); }
                 if (widget.Background.Length > 0) { using var bg = new SolidBrush(ParseColor(widget.Background)); g.FillRectangle(bg, box); }
+                if (widget.Kind == WidgetKind.OnlineImage)
+                {
+                    string status = online?.Draw(g, widget, box, t.Time) ?? "Online source · Live only";
+                    if (status.Length > 0)
+                    {
+                        using var shade = new SolidBrush(Color.FromArgb(210, 10, 17, 29));
+                        using var imageInk = new SolidBrush(Color.White);
+                        var line = new Rectangle(box.X + 2, box.Bottom - Math.Min(30, box.Height), box.Width - 4, Math.Min(30, box.Height));
+                        g.FillRectangle(shade, line);
+                        using var imageFormat = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, LineAlignment = StringAlignment.Center };
+                        g.DrawString(status, FontFor("Segoe UI", 10, FontStyle.Regular, GraphicsUnit.Pixel), imageInk, line, imageFormat);
+                    }
+                    continue;
+                }
                 if (WidgetLayout.IsGraph(widget.Kind)) { DrawGraph(g, widget, t, box); continue; }
                 if (WidgetLayout.IsGauge(widget.Kind))
                 {
@@ -146,6 +163,13 @@ internal sealed class FrameRenderer : IDisposable
             }
             finally { g.Restore(state); }
         }
+    }
+    private static GraphicsPath Rounded(Rectangle box, int radius)
+    {
+        var path = new GraphicsPath(); int d = Math.Min(radius * 2, Math.Min(box.Width, box.Height));
+        path.AddArc(box.X, box.Y, d, d, 180, 90); path.AddArc(box.Right - d, box.Y, d, d, 270, 90);
+        path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90); path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
+        path.CloseFigure(); return path;
     }
     private void DrawGraph(Graphics g, LcdWidget widget, Telemetry telemetry, Rectangle box)
     {

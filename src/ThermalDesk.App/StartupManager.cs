@@ -26,10 +26,16 @@ internal static class StartupManager
     internal static bool ShouldStartLive(Settings settings, string[] arguments, bool shiftHeld, bool profileRecovered = false) =>
         settings.HasLiveSelection && !shiftHeld && !profileRecovered && !arguments.Contains("--preview") &&
         (arguments.Contains("--live-once") || (arguments.Contains("--startup") ? settings.StartLiveAtSignIn :
-            !arguments.Contains("--minimized") && (settings.ResumeLastProfileOnLaunch ?? settings.StartLiveAtSignIn)));
+            (!arguments.Contains("--minimized") || settings.ResumeLastProfileOnLaunch == true) &&
+            (settings.ResumeLastProfileOnLaunch ?? (settings.LastSessionWasLive || settings.StartLiveAtSignIn))));
     internal static bool ShouldStartMinimized(Settings settings, string[] arguments, bool profileRecovered, bool shiftHeld = false) =>
         !profileRecovered && !shiftHeld && !arguments.Contains("--show-window") &&
         (settings.MinimizeAfterStartup ?? arguments.Contains("--minimized"));
+    internal static void RememberSuccessfulLive(Settings settings)
+    {
+        settings.LastSessionWasLive = true;
+        settings.ResumeLastProfileOnLaunch ??= true;
+    }
     internal static bool ShouldHideOnClose(bool enabled, CloseReason reason, bool exiting) =>
         enabled && reason == CloseReason.UserClosing && !exiting;
     internal static void WaitForPrevious(string[] arguments)

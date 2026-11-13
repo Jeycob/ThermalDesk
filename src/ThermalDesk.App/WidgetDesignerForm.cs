@@ -54,6 +54,9 @@ internal sealed class WidgetDesignerForm : Form
         add.Click += (_, _) => addMenu.Show(add, new Point(0, add.Height));
         hints.SetToolTip(add, "Choose Text, a gauge, Line graph or Bar graph. Select its sensor in Content → Source. Graphs use bounded session history in RAM, without extra sensor polling.");
         tools.Controls.Add(add); tools.Controls.Add(MakeButton("Duplicate", Duplicate)); tools.Controls.Add(MakeButton("Delete", Delete));
+        var nextPage = MakeButton("Copy to next page", DuplicateToNextPage);
+        hints.SetToolTip(nextPage, "Copies the selected widget to the same position on a new rotating page. The original becomes Page 1 if it was always visible. Change the copy's Source, then Apply layout. Rotation starts automatically at the chosen display interval.");
+        tools.Controls.Add(nextPage);
         tools.Controls.Add(MakeButton("Back", () => Reorder(-1))); tools.Controls.Add(MakeButton("Front", () => Reorder(1)));
         tools.Controls.Add(MakeButton("Font…", PickFont)); tools.Controls.Add(MakeButton("Canvas color…", PickBackground)); tools.Controls.Add(MakeButton("Defaults", Defaults)); tools.Controls.Add(MakeButton("Export PNG…", Export)); root.Controls.Add(tools, 0, 1);
         var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
@@ -169,6 +172,18 @@ internal sealed class WidgetDesignerForm : Form
         if (working.Widgets.Count >= 40) throw new ArgumentException("Maximum 40 widgets per display.");
         var copy = working.Copy().Widgets.Single(w => w.Id == selected.Id); copy.Id = Guid.NewGuid().ToString("N"); copy.Name = (copy.Name.Length > 70 ? copy.Name[..70] : copy.Name) + " copy"; copy.X = Math.Min(canvasWidth - copy.Width, copy.X + 8); copy.Y = Math.Min(canvasHeight - copy.Height, copy.Y + 8); working.Widgets.Add(copy); Rebind(copy.Id); Commit();
     }
+    private void DuplicateToNextPage()
+    {
+        if (Selected is not { } selected) return;
+        if (working.Widgets.Count >= 40) throw new ArgumentException("Maximum 40 widgets per display.");
+        int next = Math.Max(1, working.Widgets.Max(w => w.Group)) + 1;
+        if (next > 16) throw new ArgumentException("Maximum 16 rotating pages. Reuse an existing page in Content → Page.");
+        var copy = working.Copy().Widgets.Single(w => w.Id == selected.Id);
+        if (selected.Group == 0) selected.Group = 1;
+        copy.Id = Guid.NewGuid().ToString("N"); copy.Group = next;
+        copy.Name = (copy.Name.Length > 65 ? copy.Name[..65] : copy.Name) + " page " + next;
+        working.Widgets.Add(copy); working.RotateWidgetGroups = true; Rebind(copy.Id); Commit();
+    }
     private void Delete() { if (Selected is not { } item) return; int i = list.SelectedIndex; working.Widgets.Remove(item); Rebind(working.Widgets.ElementAtOrDefault(Math.Max(0, i - 1))?.Id); Commit(); }
     private void Reorder(int delta)
     {
@@ -232,6 +247,11 @@ internal sealed class WidgetDesignerForm : Form
         int afterDrag = Selected!.X; canvas.MoveWithoutDraggingForTest();
         Verify(Selected!.X == afterDrag, "Lost mouse capture cannot leave widget stuck to the pointer");
         undo.PerformClick(); Verify(Selected!.X == beforeMove, "Undo restores interrupted drag");
+        var beforePage = Selected!; int pageX = beforePage.X, pageY = beforePage.Y, beforePageCount = working.Widgets.Count;
+        DuplicateToNextPage();
+        Verify(working.RotateWidgetGroups && Selected!.Group > 0 && working.Widgets.Count == beforePageCount + 1, "copy to page enables rotation");
+        Verify(Selected!.X == pageX && Selected.Y == pageY && Selected.Id != beforePage.Id && beforePage.Group == 1, "new page keeps placement and independent identity");
+        undo.PerformClick(); Verify(working.Widgets.Count == beforePageCount && !working.RotateWidgetGroups, "Undo restores complete pre-pagination state");
         return assertions;
     }
     protected override void Dispose(bool disposing) { if (disposing) { timer.Dispose(); addMenu.Dispose(); hints.Dispose(); } base.Dispose(disposing); }
@@ -261,7 +281,10 @@ internal sealed class DesignerCanvas : Control
     private RectangleF View(LcdWidget w) { var a = Area; return new(a.X + w.X * a.Width / width, a.Y + w.Y * a.Height / height, w.Width * a.Width / width, w.Height * a.Height / height); }
     public void RefreshFrame()
     {
-        try { var s = settings().Copy(); s.Rotation = 0; var next = renderer.Render(telemetry(), s, width, height); var old = frame; frame = next; old?.Dispose(); }
+        try { var s = settings().Copy(); s.Rotation = 0;
+            if (s.RotateWidgetGroups && selection() is { Group: > 0 } selected) s.Widgets = s.Widgets.Where(w => w.Group == 0 || w.Group == selected.Group).ToList();
+            s.RotateWidgetGroups = false;
+            var next = renderer.Render(telemetry(), s, width, height); var old = frame; frame = next; old?.Dispose(); }
         catch (Exception) { /* Keep the last valid preview while a media file or property is being edited. */ }
         Invalidate();
     }
@@ -323,6 +346,20 @@ internal sealed class DesignerCanvas : Control
 
 internal sealed class WidgetProperties(LcdWidget widget)
 {
+    [Category("1 · Content"), DisplayName("Page (0 = always)"), Description("0 stays visible. Pages 1–16 rotate when Rotate widget pages is enabled for this LCD. Widgets on one page appear together; use the same rectangle on different pages.")]
+    public int Group { get => widget.Group; set => widget.Group = value; }
+    [Category("8 · Online image"), DisplayName("Direct image URL"), Description("Direct HTTP(S) JPEG/PNG snapshot or multipart MJPEG, not a webpage/RTSP/HLS. Local IP cameras are allowed. No redirects, cookies, browser or embedded passwords. The source is fetched only in Live; never uploaded.")]
+    public string OnlineUrl { get => widget.OnlineUrl; set => widget.OnlineUrl = value?.Trim() ?? ""; }
+    [Category("8 · Online image"), Description("Snapshot polls JPEG/PNG. Mjpeg maintains a bounded latest-frame stream. Choose Online image / webcam as the widget Kind.")]
+    public OnlineMediaMode OnlineMode { get => widget.OnlineMode; set => widget.OnlineMode = value; }
+    [Category("8 · Online image"), DisplayName("Snapshot interval (seconds)"), Description("1–3600 seconds; 5–30 saves bandwidth. On errors, reconnect backs off to avoid flooding the camera.")]
+    public int OnlineRefreshSeconds { get => widget.OnlineRefreshSeconds; set => widget.OnlineRefreshSeconds = value; }
+    [Category("8 · Online image"), DisplayName("MJPEG decode FPS"), Description("1–5 frames/s; intermediate frames are discarded before decoding. Physical LCD FPS is a separate limit. Two FPS is normally sufficient.")]
+    public int OnlineMaxFps { get => widget.OnlineMaxFps; set => widget.OnlineMaxFps = value; }
+    [Category("8 · Online image"), Description("Contain shows the entire image; Cover crops to fill the widget without stretching.")]
+    public ImageFit ImageFit { get => widget.ImageFit; set => widget.ImageFit = value; }
+    [Category("4 · Colors"), Description("Rounded background/image corners in design pixels (0–60); no continuous animation or extra worker.")]
+    public int CornerRadius { get => widget.CornerRadius; set => widget.CornerRadius = value; }
     [Category("1 · Content")] public string Name { get => widget.Name; set => widget.Name = value; }
     [Category("1 · Content"), TypeConverter(typeof(WidgetKindConverter)), Description("Gauges and line/bar history graphs need numeric sensors. Graphs use bounded in-memory session history; configure the window/scale under Graph. Shape changes do not reset your colors or range.")]
     public WidgetKind Kind { get => widget.Kind; set => widget.Kind = value; }
@@ -417,7 +454,7 @@ internal sealed class WidgetKindConverter() : EnumConverter(typeof(WidgetKind))
         WidgetKind.Text => "Text / sensor value", WidgetKind.HorizontalGauge => "Horizontal bar", WidgetKind.VerticalGauge => "Vertical bar",
         WidgetKind.RadialGauge => "Radial arc", WidgetKind.RadialSegments => "Radial segments", WidgetKind.RadialNeedle => "Radial needle",
         WidgetKind.RadialRing => "Radial full ring", WidgetKind.RadialSemicircle => "Radial semicircle",
-        WidgetKind.LineGraph => "Line graph · history", WidgetKind.BarGraph => "Bar graph · history", _ => value.ToString()
+        WidgetKind.LineGraph => "Line graph · history", WidgetKind.BarGraph => "Bar graph · history", WidgetKind.OnlineImage => "Online image / webcam", _ => value.ToString()
     };
     public override object? ConvertTo(ITypeDescriptorContext? context, CultureInfo? culture, object? value, Type destinationType) => destinationType == typeof(string) && value is WidgetKind kind ? Label(kind) : base.ConvertTo(context, culture, value, destinationType);
     public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value) => value is string text && Enum.GetValues<WidgetKind>().FirstOrDefault(k => Label(k) == text) is var kind && Label(kind) == text ? kind : base.ConvertFrom(context, culture, value);

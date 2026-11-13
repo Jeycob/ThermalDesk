@@ -34,6 +34,7 @@ internal sealed class Engine
     private readonly ConcurrentQueue<string> log = new();
     private volatile bool conflictingController;
     private Settings current = new();
+    internal OnlineMediaCache OnlineMedia { get; } = new();
     private volatile bool controllerFault;
     public bool ControllerFault => controllerFault;
     public Telemetry Latest
@@ -100,6 +101,7 @@ internal sealed class Engine
             workers.Add(Task.Run(() => LcdLoop("480×128 panel", true, token)));
             workers.Add(Task.Run(() => LcdLoop("TOUGHLIQUID AX", false, token)));
             workers.Add(Task.Run(() => FanLoop(s, token)));
+            workers.Add(Task.Run(() => OnlineMedia.Run(() => Volatile.Read(ref current), token)));
             // Process enumeration/PDH must never run on the cooling sensor loop.
             // Mock hardware checks never enumerate the host's real processes.
             if (testTelemetry is null) { workers.Add(Task.Run(() => ProcessLoop(token))); workers.Add(Task.Run(() => LogLoop(token))); workers.Add(Task.Run(() => DailyEnergyLoop(token))); }
@@ -288,7 +290,7 @@ internal sealed class Engine
                 if (!settings.Enabled)
                 {
                     SetStatus(name, "Disabled · layout remains editable offline");
-                    await Task.Delay(250, token);
+                    await Task.Delay(1000, token);
                     continue;
                 }
                 ILcd? lcd = null;
@@ -309,10 +311,10 @@ internal sealed class Engine
                             break;
                         }
                         var telemetry = Latest with { Time = DateTimeOffset.Now };
-                        string? key = FrameRenderer.VisualKey(telemetry, display);
+                        string? key = FrameRenderer.VisualKey(telemetry, display, OnlineMedia);
                         if (encoded is null || key is null || key != previousKey || !ReferenceEquals(previousDisplay, display))
                         {
-                            using var image = renderer.Render(telemetry, display, 480, panel ? 128 : 480);
+                            using var image = renderer.Render(telemetry, display, 480, panel ? 128 : 480, OnlineMedia);
                             encoded = renderer.Encode(image); previousKey = key; previousDisplay = display;
                             FrameRenderCounts.AddOrUpdate(name, 1, (_, count) => count + 1);
                         }
@@ -389,6 +391,8 @@ internal sealed class Engine
                     var failures = monitored.ToDictionary(p => p.Port, _ => 0);
                     var clock = Stopwatch.StartNew(); double nextControl = 0, nextLight = 0, previousControl = 0;
                     var lastLighting = new Dictionary<int, LedColor[]>(); double lastKeepalive = -2;
+                    Settings? scheduleProfile = null; DateTime scheduleMinute = DateTime.MinValue;
+                    var schedule = ScheduledLighting.Unchanged;
                     while (!token.IsCancellationRequested)
                     {
                         Guard(token);
@@ -436,12 +440,15 @@ internal sealed class Engine
                         if (s.RgbEnabled && clock.Elapsed.TotalSeconds >= nextLight)
                         {
                             double elapsed = clock.Elapsed.TotalSeconds; bool keepalive = elapsed - lastKeepalive >= 2;
+                            var local = DateTime.Now; var minute = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute, 0);
+                            if (!ReferenceEquals(scheduleProfile, s) || minute != scheduleMinute)
+                            { schedule = RgbSchedule.At(s, local); scheduleProfile = s; scheduleMinute = minute; }
                             foreach (var p in s.Ports.Where(Lighting.IsManaged))
                             {
-                                var colors = Lighting.OutputFrame(p, s.RgbColor, elapsed, Latest);
+                                var colors = Lighting.OutputFrame(p, s.RgbColor, elapsed, Latest, schedule);
                                 if (keepalive || !lastLighting.TryGetValue(p.Port, out var previous) || !previous.SequenceEqual(colors))
                                 { controller.SetRgbFrame(p.Port, colors); lastLighting[p.Port] = colors; }
-                                SetStatus($"RGB port {p.Port}", p.Rgb ? $"ON · {p.RgbEffect} · {p.RgbBrightness}% · {p.LedCount} LEDs (commanded)" : "OFF · black output (commanded)");
+                                SetStatus($"RGB port {p.Port}", p.Rgb ? $"{schedule.Description} · {p.RgbEffect} · {p.LedCount} LEDs (commanded)" : "OFF · black output (commanded)");
                             }
                             if (keepalive) lastKeepalive = elapsed; nextLight = elapsed + .2;
                         }

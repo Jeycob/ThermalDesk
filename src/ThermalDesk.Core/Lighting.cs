@@ -14,11 +14,19 @@ public static class Lighting
 {
     public static bool IsManaged(PortSettings port) => port.Rgb || port.RgbOffRequested;
     public static string StateLabel(PortSettings port) => port.Rgb ? "ON" : port.RgbOffRequested ? "OFF" : "Unchanged";
-    public static LedColor[] OutputFrame(PortSettings port, string fallback, double elapsedSeconds, Telemetry telemetry)
+    public static LedColor[] OutputFrame(PortSettings port, string fallback, double elapsedSeconds, Telemetry telemetry, ScheduledLighting? schedule = null)
     {
         if (!IsManaged(port)) throw new InvalidOperationException("This port's lighting is not selected for control.");
         if (port.LedCount is < 1 or > 62) throw new ArgumentException("LED count must be 1–62.");
-        return port.Rgb ? Frame(port, fallback, elapsedSeconds, telemetry) : new LedColor[port.LedCount];
+        if (schedule is not null && (schedule.BrightnessPercent is < 0 or > 100 || !WidgetLayout.IsColor(schedule.Color, true)))
+            throw new ArgumentException("Invalid scheduled lighting parameters.");
+        if (!port.Rgb || schedule?.BrightnessPercent == 0) return new LedColor[port.LedCount];
+        var colors = schedule is { Color.Length: > 0 }
+            ? Enumerable.Repeat(LedColor.Parse(schedule.Color).Scale(port.RgbBrightness / 100d), port.LedCount).ToArray()
+            : Frame(port, fallback, elapsedSeconds, telemetry);
+        if (schedule is { BrightnessPercent: < 100 })
+            for (int i = 0; i < colors.Length; i++) colors[i] = colors[i].Scale(schedule.BrightnessPercent / 100d);
+        return colors;
     }
     public static void ValidatePalette(PortSettings port)
     {
