@@ -43,6 +43,17 @@ internal static class LogAndPerformanceChecks
             File.WriteAllText(frontendLog, "unrelated updater log"); File.SetLastWriteTimeUtc(frontendLog, DateTime.UtcNow.AddHours(1));
             Check(ProcessLogSampler.FindPreferredCandidate("llama-server", [backend, "missing1", "missing2", frontend]) == backendLog,
                 "authoritative LM backend timings take priority over newer frontend noise");
+            string strataLog = Path.Combine(backend, "strata-iq3_s.log");
+            File.WriteAllText(strataLog, "strata serve: prompt 10469 tokens = 10451 reused + 18 read in 133 ms (135.0 tok/s), 30 generated in 396 ms (75.7 tok/s), drafts accepted 15 of 17, 3 checkpoints");
+            Check(ProcessLogSampler.FindPreferredCandidate("Strata", [backend, frontend]) == strataLog,
+                "Strata native engine log wins over newer generic server/updater logs");
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            Check(ProcessLogSampler.CandidateDirectories("strata", root).First() == Path.Combine(local, "Strata", "install"),
+                "Strata discovery checks the known native-engine location without recursive scans");
+            var strataSampler = new ProcessLogSampler(_ => strataLog);
+            var strataExcerpt = strataSampler.Read(settings, t with { TopGpuProcess = new(8, "strata", 80) { StartedTicks = 123 } })[LogWidget.Key(widget)];
+            Check(strataExcerpt.IsAiLog && strataExcerpt.Metrics.GenerationTokensPerSecond == 75.7 && strataExcerpt.Metrics.PromptNewTokens == 18,
+                "Strata top-process source discovers and parses actual AI metrics");
             File.WriteAllText(path, "[2026-11-12T19:44:53+01:00][DEBUG] eval time = 1000 ms / 32 tokens (31.25 ms per token, 32.0 tokens per second)");
             var inference = sampler.Read(settings, t)[LogWidget.Key(widget)];
             File.AppendAllText(path, "\n" + new string('x', BoundedLogTail.MaximumReadBytes * 2));

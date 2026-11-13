@@ -1,3 +1,13 @@
+UNRELEASED FOLLOW-UP — Strata AI log support — 2026-11-13
+- Private .NET SDK 10.0.404; Release application build: zero warnings/errors.
+- 1637 hardware-independent core assertions passed.
+- 976 offline UI/widget checks passed; 200 render-loop iterations, GDI count 78 -> 78.
+- Native Strata summary fixtures cover generation/prefill rates, exact prompt reuse,
+  invalid/overflowing counts, mixed formats and bounded known-folder discovery.
+- Existing log polling intervals and 32 KiB read limits remain unchanged.
+- No physical USB, fan/RGB control or sensor driver was opened; no new installation
+  or physical LCD acceptance is claimed for this change.
+
 ThermalDesk 0.3.1 — validation record — 2026-11-11
 
 BUILD

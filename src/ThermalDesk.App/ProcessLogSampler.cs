@@ -46,7 +46,8 @@ internal sealed class ProcessLogSampler
         foreach (var stale in discoveries.Keys.Where(k => !result.ContainsKey(k)).ToArray()) discoveries.Remove(stale);
         return result;
     }
-    private static bool IsAiProcess(string name) => name.Equals("llama-server", StringComparison.OrdinalIgnoreCase) || name.Equals("Bionic", StringComparison.OrdinalIgnoreCase) || name.StartsWith("LM Studio", StringComparison.OrdinalIgnoreCase);
+    private static bool IsStrataProcess(string name) => name.Equals("strata", StringComparison.OrdinalIgnoreCase);
+    private static bool IsAiProcess(string name) => IsStrataProcess(name) || name.Equals("llama-server", StringComparison.OrdinalIgnoreCase) || name.Equals("Bionic", StringComparison.OrdinalIgnoreCase) || name.StartsWith("LM Studio", StringComparison.OrdinalIgnoreCase);
     private LogExcerpt ReadCached(string path)
     {
         try
@@ -85,7 +86,12 @@ internal sealed class ProcessLogSampler
         var candidates = directories.Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToArray();
         // The backend timing log is authoritative. A newer updater/frontend log
         // next to the executable must not displace it simply because it is newer.
-        int known = IsAiProcess(name) ? 3
+        if (IsStrataProcess(name))
+        {
+            string engine = FindCandidate(candidates.Take(1), path => Path.GetFileName(path).StartsWith("strata-", StringComparison.OrdinalIgnoreCase) && Path.GetExtension(path).Equals(".log", StringComparison.OrdinalIgnoreCase));
+            if (engine.Length > 0) return engine;
+        }
+        int known = IsStrataProcess(name) ? 2 : IsAiProcess(name) ? 3
             : name.Contains("opencode", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
         string preferred = FindCandidate(candidates.Take(known));
         return preferred.Length > 0 ? preferred : FindCandidate(candidates.Skip(known));
@@ -93,6 +99,12 @@ internal sealed class ProcessLogSampler
     internal static IEnumerable<string> CandidateDirectories(string name, string executableFolder)
     {
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (IsStrataProcess(name))
+        {
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            yield return Path.Combine(local, "Strata", "install");
+            yield return Path.Combine(local, "Strata", "logs");
+        }
         if (name.Equals("llama-server", StringComparison.OrdinalIgnoreCase) || name.Equals("Bionic", StringComparison.OrdinalIgnoreCase) || name.StartsWith("LM Studio", StringComparison.OrdinalIgnoreCase))
         {
             string logs = Path.Combine(home, ".lmstudio", "apps", "bionic", "server-logs");
@@ -112,7 +124,7 @@ internal sealed class ProcessLogSampler
             yield return executableFolder;
         }
     }
-    internal static string FindCandidate(IEnumerable<string> directories)
+    internal static string FindCandidate(IEnumerable<string> directories, Func<string, bool>? accept = null)
     {
         string best = ""; DateTime latest = DateTime.MinValue; int entries = 0;
         foreach (var directory in directories.Distinct(StringComparer.OrdinalIgnoreCase).Take(6))
@@ -123,6 +135,7 @@ internal sealed class ProcessLogSampler
                 foreach (string path in Directory.EnumerateFiles(directory).Take(128))
                 {
                     if (++entries > 384) return best;
+                    if (accept is not null && !accept(path)) continue;
                     string extension = Path.GetExtension(path);
                     if (!new[] { ".log", ".txt", ".out", ".err", ".jsonl" }.Contains(extension, StringComparer.OrdinalIgnoreCase)) continue;
                     if (extension.Equals(".txt", StringComparison.OrdinalIgnoreCase) && !Path.GetFileName(path).Contains("log", StringComparison.OrdinalIgnoreCase)) continue;

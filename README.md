@@ -68,6 +68,10 @@ independent settings and rotation.
 - **AI log** shows the last reported generation/prompt tokens/s, context and age
   when provided. OLD means stale, not current streaming speed. LM Studio backend
   logs are preferred. Choose **RawTail** for raw latest lines.
+- **Strata** native logs are also recognized: decode tokens/s, prefill tokens/s
+  and reused/new prompt tokens. Wide AI widgets show **CACHE %**. These are the
+  last reported inference values, not instantaneous GPU speed. Automatic
+  discovery checks known local folders only; no recursive disk scan.
 - Game FPS/latency needs a suitable log or per-process PresentMon CSV. This is
   not an injected live overlay; PC rendering latency is not network ping.
 

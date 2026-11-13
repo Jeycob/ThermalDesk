@@ -13,6 +13,11 @@ public sealed record LogMetrics
     public int? GeneratedTokens { get; init; }
     public int? ContextUsed { get; init; }
     public int? ContextCapacity { get; init; }
+    public int? PromptTotalTokens { get; init; }
+    public int? PromptReusedTokens { get; init; }
+    public int? PromptNewTokens { get; init; }
+    public double? PromptCacheHitPercent => PromptTotalTokens is > 0 && PromptReusedTokens is >= 0 &&
+        PromptReusedTokens <= PromptTotalTokens ? 100.0 * PromptReusedTokens / PromptTotalTokens : null;
     public double? Fps { get; init; }
     public double? FrameMilliseconds { get; init; }
     public double? NetworkLatencyMilliseconds { get; init; }
@@ -31,6 +36,9 @@ public sealed record LogMetrics
         PromptTokensPerSecond = PromptTokensPerSecond ?? previous.PromptTokensPerSecond,
         GeneratedTokens = GeneratedTokens ?? previous.GeneratedTokens,
         ContextUsed = ContextUsed ?? previous.ContextUsed, ContextCapacity = ContextCapacity ?? previous.ContextCapacity,
+        PromptTotalTokens = PromptTotalTokens ?? (HasAiRates ? null : previous.PromptTotalTokens),
+        PromptReusedTokens = PromptReusedTokens ?? (HasAiRates ? null : previous.PromptReusedTokens),
+        PromptNewTokens = PromptNewTokens ?? (HasAiRates ? null : previous.PromptNewTokens),
         GenerationReportedAt = !GenerationTokensPerSecond.HasValue || GenerationReportOffset == previous.GenerationReportOffset && GenerationTokensPerSecond == previous.GenerationTokensPerSecond ? previous.GenerationReportedAt : GenerationReportedAt,
         PromptReportedAt = !PromptTokensPerSecond.HasValue || PromptReportOffset == previous.PromptReportOffset && PromptTokensPerSecond == previous.PromptTokensPerSecond ? previous.PromptReportedAt : PromptReportedAt,
         GenerationReportOffset = GenerationTokensPerSecond.HasValue ? GenerationReportOffset : previous.GenerationReportOffset,
@@ -46,6 +54,7 @@ public static class LogMetricsParser
     private static readonly Regex Timing = Pattern(@"(?m)^[^\r\n]*?(?<kind>prompt\s+eval|eval)\s+time\s*=[^\r\n]*?/\s*(?<tokens>\d+)\s+tokens[^\r\n]*?[, ](?<v>\d+(?:\.\d+)?)\s+tokens\s+per\s+second");
     private static readonly Regex Generation = Pattern(@"(?:\b(?:generation|decode)(?:\s+(?:speed|rate))?\s*[:=]\s*(?<v>\d+(?:\.\d+)?)\s*(?:tokens/s|tok/s|t/s)|\bpredicted_per_second[""']?\s*:\s*(?<v>\d+(?:\.\d+)?))");
     private static readonly Regex Prompt = Pattern(@"(?:\b(?:prompt|prefill)(?:\s+(?:speed|rate))?\s*[:=]\s*(?<v>\d+(?:\.\d+)?)\s*(?:tokens/s|tok/s|t/s)|\bprompt_per_second[""']?\s*:\s*(?<v>\d+(?:\.\d+)?))");
+    private static readonly Regex Strata = Pattern(@"(?m)^[^\r\n]*?\bstrata serve:\s+prompt\s+(?<total>\d+)\s+tokens\s*=\s*(?<reused>\d+)\s+reused\s*\+\s*(?<read>\d+)\s+read\s+in\s+\d+(?:\.\d+)?\s+ms\s+\((?<prompt>\d+(?:\.\d+)?)\s+tok/s\),\s*(?<tokens>\d+)\s+generated\s+in\s+\d+(?:\.\d+)?\s+ms\s+\((?<generation>\d+(?:\.\d+)?)\s+tok/s\)");
     private static readonly Regex ContextUsed = Pattern(@"\b(?:n_past|context_used|context_tokens)\s*[:=]\s*(?<v>\d+)");
     private static readonly Regex ContextCapacity = Pattern(@"\b(?:n_ctx_slot|context_capacity)\s*[:=]\s*(?<v>\d+)");
     private static readonly Regex Fps = Pattern(@"(?:\bfps\s*[:=]\s*(?<v>\d+(?:\.\d+)?)|\b(?<v>\d+(?:\.\d+)?)\s+fps\b)");
@@ -73,6 +82,7 @@ public static class LogMetricsParser
         {
             if (csvHeader is not null) return ParseCsv(csvHeader, text);
             double? generation = null, prompt = null; int? tokens = null; int generationIndex = -1, promptIndex = -1;
+            int? promptTotal = null, promptReused = null, promptNew = null;
             DateTimeOffset generationTime = default, promptTime = default;
             foreach (Match match in Timing.Matches(text))
             {
@@ -80,18 +90,34 @@ public static class LogMetricsParser
                 if (match.Groups["kind"].Value.StartsWith("prompt", StringComparison.OrdinalIgnoreCase)) { prompt = rate; promptTime = ReportTime(text, match.Index); promptIndex = match.Index; }
                 else { generation = rate; generationTime = ReportTime(text, match.Index); generationIndex = match.Index; if (int.TryParse(match.Groups["tokens"].Value, out int count)) tokens = count; }
             }
+            foreach (Match match in Strata.Matches(text))
+            {
+                bool Count(string name, out int value) => int.TryParse(match.Groups[name].Value, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+                if (!Count("total", out int total) || !Count("reused", out int reused) || !Count("read", out int fresh) ||
+                    !Count("tokens", out int generated) || (long)reused + fresh != total ||
+                    !double.TryParse(match.Groups["generation"].Value, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out double genRate) || genRate is < 0 or > 1000000 ||
+                    !double.TryParse(match.Groups["prompt"].Value, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out double promptRate) || promptRate is < 0 or > 1000000) continue;
+                if (match.Index > generationIndex)
+                { generation = genRate; tokens = generated; generationTime = ReportTime(text, match.Index); generationIndex = match.Index; }
+                if (match.Index > promptIndex)
+                {
+                    prompt = promptRate; promptTime = ReportTime(text, match.Index); promptIndex = match.Index;
+                    promptTotal = total; promptReused = reused; promptNew = fresh;
+                }
+            }
             foreach (Match match in Generation.Matches(text))
                 if (match.Index > generationIndex && double.TryParse(match.Groups["v"].Value, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out double rate) && rate is >= 0 and <= 1000000)
                 { generation = rate; generationTime = ReportTime(text, match.Index); generationIndex = match.Index; tokens = null; }
             foreach (Match match in Prompt.Matches(text))
                 if (match.Index > promptIndex && double.TryParse(match.Groups["v"].Value, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out double rate) && rate is >= 0 and <= 1000000)
-                { prompt = rate; promptTime = ReportTime(text, match.Index); promptIndex = match.Index; }
+                { prompt = rate; promptTime = ReportTime(text, match.Index); promptIndex = match.Index; promptTotal = promptReused = promptNew = null; }
             return new()
             {
                 GenerationTokensPerSecond = generation, PromptTokensPerSecond = prompt, GeneratedTokens = tokens,
                 GenerationReportedAt = generationTime, PromptReportedAt = promptTime,
+                PromptTotalTokens = promptTotal, PromptReusedTokens = promptReused, PromptNewTokens = promptNew,
                 GenerationReportOffset = generationIndex, PromptReportOffset = promptIndex,
-                ContextUsed = (int?)Last(ContextUsed, text, int.MaxValue), ContextCapacity = (int?)Last(ContextCapacity, text, int.MaxValue),
+                ContextUsed = (int?)Last(ContextUsed, text, int.MaxValue) ?? promptTotal, ContextCapacity = (int?)Last(ContextCapacity, text, int.MaxValue),
                 Fps = Last(Fps, text, 10000), FrameMilliseconds = Last(Frame, text, 100000), NetworkLatencyMilliseconds = Last(Network, text, 60000)
             };
         }
@@ -150,8 +176,9 @@ public static class LogPresentation
             double age = reported == default ? 0 : Math.Max(0, (now - reported).TotalSeconds);
             string label = age > widget.LogStaleSeconds ? "OLD GEN" : "LAST GEN";
             string ago = reported == default ? "" : age < 60 ? $"{(int)age}s ago" : age < 3600 ? $"{(int)(age / 60)}m ago" : $"{(int)(age / 3600)}h ago";
+            string cache = metrics.PromptCacheHitPercent.HasValue ? $" · CACHE {Number(metrics.PromptCacheHitPercent)}%" : "";
             text = narrow ? $"{label}\n{Number(metrics.GenerationTokensPerSecond)} tok/s\nLAST PROMPT\n{Number(metrics.PromptTokensPerSecond, "0")} tok/s\nCTX (LOG)\n{Number(metrics.ContextUsed, "0")}/{Number(metrics.ContextCapacity, "0")}" :
-                $"{label} {Number(metrics.GenerationTokensPerSecond)} tok/s\nLAST PROMPT {Number(metrics.PromptTokensPerSecond, "0")} tok/s\nCTX {Number(metrics.ContextUsed, "0")}/{Number(metrics.ContextCapacity, "0")}{(ago.Length == 0 ? "" : " · " + ago)}";
+                $"{label} {Number(metrics.GenerationTokensPerSecond)} tok/s\nLAST PROMPT {Number(metrics.PromptTokensPerSecond, "0")} tok/s\nCTX {Number(metrics.ContextUsed, "0")}/{Number(metrics.ContextCapacity, "0")}{cache}{(ago.Length == 0 ? "" : " · " + ago)}";
         }
         else if (mode == LogDisplayMode.Gaming)
         {

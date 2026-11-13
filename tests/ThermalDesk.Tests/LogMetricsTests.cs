@@ -13,6 +13,28 @@ internal static class LogMetricsTests
         var json = LogMetricsParser.Parse("{\"predicted_per_second\":31.5,\"prompt_per_second\":1500.2}");
         check(json.GenerationTokensPerSecond == 31.5 && json.PromptTokensPerSecond == 1500.2, "explicit llama API timing field names supported");
         check(LogMetricsParser.Parse("generation: 20 tok/s\ngeneration: 40 tok/s").GenerationTokensPerSecond == 40, "last reported speed wins");
+        string strataLog = "strata serve: prompt 10469 tokens = 10451 reused + 18 read in 133 ms (135.0 tok/s), 30 generated in 396 ms (75.7 tok/s), drafts accepted 15 of 17, 3 checkpoints";
+        var strata = LogMetricsParser.Parse(strataLog);
+        check(strata.GenerationTokensPerSecond == 75.7 && strata.PromptTokensPerSecond == 135 && strata.GeneratedTokens == 30,
+            "real Strata inference summary distinguishes decode from new-token prefill throughput");
+        check(strata.ContextUsed == 10469 && strata.ContextCapacity is null && strata.PromptReusedTokens == 10451 && strata.PromptNewTokens == 18,
+            "Strata prompt totals and reused/new counts are reported without inventing a context capacity");
+        check(Math.Abs(strata.PromptCacheHitPercent!.Value - 99.8281) < 0.001,
+            "Strata prefix cache percentage uses reused prompt tokens, not generated tokens");
+        var strataFresh = LogMetricsParser.Parse(strataLog.Replace("10451 reused + 18", "0 reused + 10469"));
+        check(strataFresh.PromptCacheHitPercent == 0, "Strata full-prefill report has zero cache hits");
+        check(LogMetricsParser.Parse(strataLog.Replace("10451 reused + 18", "10452 reused + 18")).GenerationTokensPerSecond is null,
+            "inconsistent Strata token counts reject the whole timing report");
+        check(LogMetricsParser.Parse(strataLog.Replace("10469 tokens", "999999999999 tokens")).GenerationTokensPerSecond is null,
+            "overflowing Strata prompt counts cannot leak partial performance values");
+        check(LogMetricsParser.Parse(strataLog.Replace("135.0 tok/s", "NaN tok/s")).GenerationTokensPerSecond is null,
+            "invalid Strata timing does not fabricate partial valid-looking rates");
+        check(LogMetricsParser.Parse(strataLog + "\ngeneration: 99 tok/s").GenerationTokensPerSecond == 99 &&
+            LogMetricsParser.Parse(log + "\n" + strataLog).GenerationTokensPerSecond == 75.7,
+            "newest inference report wins across Strata and other supported formats");
+        check(LogMetricsParser.Parse("unrelated request noise").RetainAi(strata).PromptCacheHitPercent == strata.PromptCacheHitPercent &&
+            LogMetricsParser.Parse("generation: 22 tok/s").RetainAi(strata).PromptCacheHitPercent is null,
+            "cache metrics survive append noise but are not inherited by a different timing format");
         var reported = DateTimeOffset.Parse("2026-11-12T19:44:53+01:00");
         var timed = LogMetricsParser.Parse("[2026-11-12T19:44:53+01:00][DEBUG] I slot print_timing: id 1 | task 14 | eval time = 23571.57 ms / 924 tokens (25.51 ms per token, 39.16 tokens per second)");
         check(timed.GenerationTokensPerSecond == 39.16 && timed.GeneratedTokens == 924 && timed.GenerationReportedAt == reported, "real LM Studio slot timing includes the original report time, not the newest file write");
@@ -32,6 +54,8 @@ internal static class LogMetricsTests
         var entry = new LogExcerpt("sample.log", log, "OK", now) { Metrics = stats, WrittenTime = now };
         var widget = new LcdWidget { Source = WidgetSource.TextFileLog, TextTemplate = "{value}", Width = 440, Height = 100, FontSize = 20, LogDisplay = LogDisplayMode.Auto };
         string text = LogPresentation.Format(widget, entry, now);
+        check(LogPresentation.Format(widget, entry with { Text = strataLog, Metrics = strata }, now).Contains("CACHE 99.8%"),
+            "wide compact AI widget exposes actual Strata cache efficiency");
         check(text.StartsWith("LAST GEN 32.0 tok/s") && text.Contains("LAST PROMPT 1250 tok/s"), "auto compact AI mode prioritizes correctly labeled rates");
         widget.Source = WidgetSource.TopGpuProcessLog; widget.LogDisplay = LogDisplayMode.Tail;
         check(LogPresentation.Format(widget, entry, now).StartsWith("LAST GEN 32.0 tok/s"), "legacy top GPU Tail widget automatically exposes actual AI throughput");
