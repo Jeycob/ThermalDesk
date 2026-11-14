@@ -45,6 +45,37 @@ port = new() { Port = 1, Role = PortRole.Fan, Mode = ControlMode.Curve, Source =
 safety.Reset(); var initial = safety.Evaluate(port, Tele(60), now, 2).Duty;
 Check(safety.Evaluate(port, Tele(59), now, 2).Duty == initial, "2 degree downward hysteresis");
 Check(safety.Evaluate(port, Tele(50), now, 2).Duty < initial, "hysteresis release");
+// Replay temperature spikes and sustained load for every selectable source.
+foreach (var source in Enum.GetValues<TemperatureSource>())
+{
+    var quietPort = new PortSettings { Port = 1, Role = PortRole.Fan, Mode = ControlMode.Curve, Source = source, MinimumDuty = 30, Curve = [new(40, 30), new(80, 90)] };
+    var quiet = new FanSafety();
+    FanDecision At(double cpu, double gpu, double second, double interval = 2) => quiet.Evaluate(quietPort, Tele(cpu, gpu) with { Time = now.AddSeconds(second) }, now.AddSeconds(second), interval);
+    double hotCpu = source == TemperatureSource.Gpu ? 40 : 80;
+    double hotGpu = source == TemperatureSource.Cpu ? 40 : 80;
+    Check(At(40, 40, 0).Duty == 30, source + " initial curve duty");
+    Check(At(hotCpu, hotGpu, 2).Duty == 30, source + " first high sample does not accelerate fans");
+    Check(At(hotCpu, hotGpu, 4).Duty == 30, source + " two-second peak stays quiet");
+    Check(At(40, 40, 5, 1).Duty == 30, source + " three-second peak ends without a duty increase");
+    Check(At(hotCpu, hotGpu, 6, 1).Duty == 30, source + " separate peaks do not accumulate delay credit");
+    Check(At(hotCpu, hotGpu, 10).Duty == 30, source + " four-second hold before ramp");
+    var rising = At(hotCpu, hotGpu, 12);
+    Check(rising.Duty == 36 && rising.TargetDuty == 90, source + " sustained heat ramps six points in two seconds while target stays visible");
+    Check(At(hotCpu, hotGpu, 14).Duty == 42, source + " sustained heat continues a bounded gradual ramp");
+    Check(At(40, 40, 16).Duty == 36, source + " peak ending during ramp starts the normal slow reduction");
+    Check(At(hotCpu, hotGpu, 18).Duty == 36, source + " new spike starts a fresh hold");
+    Check(At(86, 40, 19, 1).Duty == 100, source + " CPU critical bypasses peak filter immediately");
+    quiet.Reset(); At(40, 40, 20); At(hotCpu, hotGpu, 22);
+    Check(At(40, 90, 23, 1).Duty == 100, source + " GPU critical bypasses peak filter immediately");
+    quiet.Reset(); At(40, 40, 24);
+    quietPort.MinimumDuty = 60;
+    Check(At(40, 40, 26).Duty == 60, source + " raising the configured minimum is never delayed below the floor");
+    quietPort.MinimumDuty = 30; quietPort.Role = PortRole.Pump; quiet.Reset(); At(40, 40, 28);
+    Check(At(hotCpu, hotGpu, 30).Duty == 90, source + " pump cooling increases are never delayed");
+}
+var corePeak = new FanSafety();
+corePeak.Evaluate(port, Tele(40), now, 2);
+Check(corePeak.Evaluate(port, Tele(60) with { CpuMaximumTemperature = 90 }, now, 2).Duty == 100, "hot CPU core bypasses peak filtering even if aggregate CPU is cooler");
 var settings = new Settings(); settings.Validate(); Check(!settings.CoolingEnabled && !settings.Panel.Enabled && !settings.Aio.Enabled, "all writes default off");
 Throws(settings.ValidateLiveSelection, "empty live session rejected");
 settings.Aio.Enabled = true; settings.ValidateLiveSelection(); Check(true, "explicit LCD is a valid live selection"); settings.Aio.Enabled = false;

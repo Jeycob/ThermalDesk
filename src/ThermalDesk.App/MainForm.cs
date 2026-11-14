@@ -292,7 +292,7 @@ internal sealed class MainForm : Form
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "LEDs", FillWeight = 36 });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Curve", HeaderText = "Curve · °C:% separated by ;", FillWeight = 210 });
         ports.Columns.Add(new DataGridViewButtonColumn { Name = "Editor", HeaderText = "Curve / RGB", Text = "Edit…", UseColumnTextForButtonValue = true, FillWeight = 60 });
-        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Requested", HeaderText = "Request → target %", ReadOnly = true, FillWeight = 85, ToolTipText = "Current software command → final curve target. Reductions are smoothed; percentages are not RPM or watts." });
+        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Requested", HeaderText = "Request → target %", ReadOnly = true, FillWeight = 85, ToolTipText = "Current command → curve target. Automatic fan rises wait 4 seconds, then ramp by 3 percentage points/second. Critical heat responds immediately. Percentages are not RPM or watts." });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Reported", HeaderText = "Reported %", ReadOnly = true, FillWeight = 55, ToolTipText = "Duty returned by the controller, not an independent measurement of electrical power." });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "RPM", HeaderText = "RPM", ReadOnly = true, FillWeight = 50, ToolTipText = "Tachometer feedback in revolutions per minute; unavailable after Stop or a controller fault." });
         var help = new[]

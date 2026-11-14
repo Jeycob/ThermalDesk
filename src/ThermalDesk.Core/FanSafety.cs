@@ -10,6 +10,7 @@ public sealed class FanSafety
 {
     private double? previous;
     private double? heldTemperature;
+    private DateTimeOffset? riseSince;
     public FanDecision Evaluate(PortSettings p, Telemetry t, DateTimeOffset now, double seconds)
     {
         if (p.Mode == ControlMode.Preserve) { Reset(); return new(null, "Unmanaged"); }
@@ -30,19 +31,32 @@ public sealed class FanSafety
         if (p.Mode == ControlMode.Fixed) target = p.FixedDuty;
         else
         {
-            // Increases are immediate; decreases require a 2 °C drop.
+            // Keep the existing downward temperature hysteresis. Fan duty rises
+            // are filtered separately, after converting the selected source.
             if (heldTemperature is null || temperature > heldTemperature || heldTemperature - temperature >= 2) heldTemperature = temperature;
             target = Interpolate(p.Curve, heldTemperature!.Value);
         }
         int floor = p.Role == PortRole.Pump ? Math.Max(60, p.MinimumDuty) : Math.Max(30, p.MinimumDuty);
         target = Math.Clamp(target, floor, 100);
         int finalTarget = (int)Math.Ceiling(target);
-        // Never slew-limit safety responses. Normal reductions are deliberately slow.
+        string response = "";
+        // Only automatic fan curves get the acoustic filter. Explicit Fixed / Full
+        // requests, pump increases and the critical override above stay immediate.
+        if (previous.HasValue && target > previous && p.Mode == ControlMode.Curve && p.Role == PortRole.Fan)
+        {
+            riseSince ??= now;
+            double sustained = Math.Max(0, (now - riseSince.Value).TotalSeconds);
+            double rampSeconds = Math.Min(Math.Clamp(seconds, 0, 2), Math.Max(0, sustained - 4));
+            target = Math.Max(floor, Math.Min(target, previous.Value + 3 * rampSeconds));
+            response = sustained <= 4 ? " · filtering short peak" : " · gradual rise";
+        }
+        else riseSince = null;
+        // Normal reductions remain slow; real critical heat bypasses both ramps.
         if (previous.HasValue && target < previous) target = Math.Max(target, previous.Value - 3 * Math.Clamp(seconds, 0, 10));
         previous = target;
-        return new((int)Math.Ceiling(target), p.Mode == ControlMode.Fixed ? "Fixed" : $"Curve · {heldTemperature:0.0} °C") { TargetDuty = finalTarget };
+        return new((int)Math.Ceiling(target), p.Mode == ControlMode.Fixed ? "Fixed" : $"Curve · {heldTemperature:0.0} °C" + response) { TargetDuty = finalTarget };
     }
-    private FanDecision Full(string reason) { previous = 100; heldTemperature = null; return new(100, reason) { TargetDuty = 100 }; }
+    private FanDecision Full(string reason) { previous = 100; heldTemperature = null; riseSince = null; return new(100, reason) { TargetDuty = 100 }; }
     private FanDecision Release(string reason) => new(null, reason + " · release software control; do not force full speed");
     public static bool IsCritical(Telemetry t, DateTimeOffset now)
     {
@@ -50,7 +64,7 @@ public sealed class FanSafety
         return now - t.Time <= TimeSpan.FromSeconds(5) && t.Time - now <= TimeSpan.FromSeconds(1) &&
             (ValidHot(t.CpuTemperature) || ValidHot(t.CpuMaximumTemperature) || ValidHot(t.GpuTemperature));
     }
-    public void Reset() { previous = heldTemperature = null; }
+    public void Reset() { previous = heldTemperature = null; riseSince = null; }
     public static double Interpolate(IReadOnlyList<CurvePoint> points, double value)
     {
         if (!double.IsFinite(value) || points.Count < 2) throw new ArgumentException("Invalid curve input.");

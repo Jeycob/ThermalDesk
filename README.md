@@ -185,3 +185,10 @@ reads do not add a full polling delay. The five-second stale-data guard still
 pauses cooling control; port status includes the shared cause. The last fault's
 reason, sample age and sampler timing are kept in
 `%LOCALAPPDATA%\ThermalDesk\last-controller-fault.json` (one overwritten file).
+
+Automatic fan curves ignore brief rises for 4 seconds, then increase the requested
+duty by at most 3 percentage points/second. A peak that ends during the hold does
+not accelerate the fans. This applies to CPU, GPU and Maximum sources. Startup
+uses the current curve directly. Fixed / Full commands and pump increases remain
+immediate; valid critical CPU/core/GPU heat at 85 °C bypasses the filter. Existing
+minimum duties, stale-sensor checks and gradual reductions remain active.

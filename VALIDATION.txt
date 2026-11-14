@@ -655,3 +655,9 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
 - New sampler uses a dedicated thread and start-to-start deadlines. Nine mock checks pass, including unchanged stale-data latching, causal port status and single release without reconnect.
 - Core checks: 1667 assertions passed. Physical stability after deployment is a separate observation; no sleep/resume or disconnected-hardware guarantee.
 - Full release widget/mock run: 1002 checks and 200 renders passed; dedicated sampler regression: 9 checks passed. No physical USB writes in these checks.
+
+0.3.24 fan peak filtering (2026-11-14):
+- Four-second sustained-rise hold for automatic Fan curves, followed by at most 3 percentage points/second upward slew. All temperature sources covered.
+- Added 43 deterministic replay assertions for short/separate peaks, sustained heat, downward recovery, target visibility, minimum duty, pumps and CPU/core/GPU critical overrides.
+- Core runner: 1710 assertions passed. Stale-data and 85 C critical thresholds unchanged.
+- Full application mock/widget run: 1002 checks and 200 renders passed.

@@ -128,7 +128,7 @@ internal sealed class PortEditorForm : Form
         points.Enabled = curve;
         fanHint.Text = selected == nameof(ControlMode.Preserve) ? "Leave fan speed untouched. The BIOS/vendor setting remains responsible. RGB can still be controlled separately."
             : fixedMode ? $"Constant requested speed: {fixedDuty.Value}%. Temperature safety remains active. Choose Silent for automatic, quieter cooling."
-            : $"Temperature-controlled curve. Minimum {minimum.Value}% overrides any lower curve point. Changes are smoothed to avoid rapid fan-speed cycling.";
+            : $"Temperature-controlled curve. Minimum {minimum.Value}% overrides lower points. Fan rises wait 4 seconds, then increase gradually (3 percentage points/second). Critical CPU/GPU heat at 85 °C responds immediately; pump increases stay immediate.";
     }
     private static string FieldHint(string name) => name switch
     {
