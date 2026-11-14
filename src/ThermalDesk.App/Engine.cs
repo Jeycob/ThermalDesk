@@ -37,6 +37,8 @@ internal sealed class Engine
     internal OnlineMediaCache OnlineMedia { get; } = new();
     private volatile bool controllerFault;
     public bool ControllerFault => controllerFault;
+    private double lastSensorReadMilliseconds;
+    private double lastSensorGapMilliseconds;
     public Telemetry Latest
     {
         get
@@ -81,6 +83,7 @@ internal sealed class Engine
         if (live && settings.HasUsbSelection && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
         var s = settings.Copy(); Volatile.Write(ref current, s); stop = new(); var token = stop.Token; Live = live; conflictingController = false; controllerFault = false;
         Status.Clear(); Fans.Clear(); FanCommands.Clear(); FrameRenderCounts.Clear();
+        Volatile.Write(ref lastSensorReadMilliseconds, 0); Volatile.Write(ref lastSensorGapMilliseconds, 0);
         latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
         activity = ProcessActivity.Disabled; processLog.Clear();
         Volatile.Write(ref excerpts, LogExcerpt.Empty); Volatile.Write(ref merged, null);
@@ -93,7 +96,9 @@ internal sealed class Engine
             Status["Session"] = "PREVIEW · all live devices disabled · sign-in preference retained";
             Note("Live sign-in preference retained, but no live devices are selected. Opened in Preview without hardware access; enable a device before starting live control.");
         }
-        var workers = new List<Task> { Task.Run(() => SensorLoop(live, token)) };
+        // Hardware reads can block inside a driver. Keep the safety sampler off
+        // the shared pool used by LCD JPEGs, online images and process queries.
+        var workers = new List<Task> { Task.Factory.StartNew(() => SensorLoop(live, token), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default) };
         if (live)
         {
             // Disabled workers wait without opening hardware. Each LCD can be enabled,
@@ -153,16 +158,20 @@ internal sealed class Engine
         if (!controllerFault && Status.ContainsKey("Controller")) Status["Controller"] = "Released · no live controller feedback";
         Status["Session"] = "Stopped"; Note("Stopped. Captured fan duties requested back, except a real critical-temperature override. Restoration is not BIOS hand-back or a guaranteed hardware watchdog.");
     }
-    private async Task SensorLoop(bool live, CancellationToken token)
+    private void SensorLoop(bool live, CancellationToken token)
     {
         Monitoring? monitor = null;
         var history = new TelemetryHistory(live && testTelemetry is null ? DailyEnergyStore.Load() : null,
             restoredRollingEnergy: live && testTelemetry is null ? RollingEnergyStore.Load() : null);
+        long previousSampleStart = 0;
         try
         {
             while (!token.IsCancellationRequested)
             {
                 int seconds = SensorInterval(Volatile.Read(ref current));
+                long sampleStart = Stopwatch.GetTimestamp();
+                if (previousSampleStart != 0) Volatile.Write(ref lastSensorGapMilliseconds, Stopwatch.GetElapsedTime(previousSampleStart, sampleStart).TotalMilliseconds);
+                previousSampleStart = sampleStart;
                 try
                 {
                     if (live)
@@ -188,7 +197,13 @@ internal sealed class Engine
                     Volatile.Write(ref latest, new(DateTimeOffset.UtcNow, null, null, null, null, null, e.Message));
                     SetStatus("Sensors", "ERROR · " + e.Message); monitor?.Dispose(); monitor = null;
                 }
-                await Task.Delay(TimeSpan.FromSeconds(seconds), token);
+                Volatile.Write(ref lastSensorReadMilliseconds, Stopwatch.GetElapsedTime(sampleStart).TotalMilliseconds);
+                // PollSeconds is a start-to-start interval. Adding a full delay
+                // after a slow read could age a valid sample past the unchanged
+                // five-second cooling limit before the next read completed.
+                var remaining = TimeSpan.FromSeconds(seconds) - Stopwatch.GetElapsedTime(sampleStart);
+                // Avoid a tight retry loop when a driver consistently overruns.
+                token.WaitHandle.WaitOne(remaining > TimeSpan.FromMilliseconds(20) ? remaining : TimeSpan.FromMilliseconds(20));
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -460,11 +475,23 @@ internal sealed class Engine
                 catch (Exception e)
                 {
                     controllerFault = true;
+                    var faultSample = Latest;
+                    var faultTime = DateTimeOffset.UtcNow;
+                    string cause = e.Message + $" · sample age {(faultTime - faultSample.Time).TotalSeconds:0.00} s; last read {Volatile.Read(ref lastSensorReadMilliseconds):0} ms; sample gap {Volatile.Read(ref lastSensorGapMilliseconds):0} ms";
+                    if (testTelemetry is null)
+                    {
+                        try
+                        {
+                            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ThermalDesk", "last-controller-fault.json");
+                            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new { time = faultTime, reason = e.Message, sampleTime = faultSample.Time, sampleAgeSeconds = (faultTime - faultSample.Time).TotalSeconds, lastReadMilliseconds = Volatile.Read(ref lastSensorReadMilliseconds), sampleGapMilliseconds = Volatile.Read(ref lastSensorGapMilliseconds), faultSample.CpuTemperature, faultSample.GpuTemperature }, Settings.JsonOptions));
+                        }
+                        catch (Exception diagnosticError) when (diagnosticError is IOException or UnauthorizedAccessException) { Note("Could not save controller fault: " + diagnosticError.GetType().Name); }
+                    }
                     SetStatus("Controller", controller is null
-                        ? (controllerAttempted ? "FAULT LATCHED · connection attempt failed; ownership not established · " : "FAULT LATCHED · startup blocked before fan USB access · ") + e.Message
-                        : "FAULT LATCHED · " + e.Message + " · captured duties requested back; no forced full-speed fallback or automatic reconnect. Restore vendor control.");
+                        ? (controllerAttempted ? "FAULT LATCHED · connection attempt failed; ownership not established · " : "FAULT LATCHED · startup blocked before fan USB access · ") + cause
+                        : "FAULT LATCHED · " + cause + " · captured duties requested back; no forced full-speed fallback or automatic reconnect. Restore vendor control.");
                     foreach (var p in monitored) SetStatus($"Port {p.Port}", controller is null
-                        ? "NOT STARTED · no software speed ownership established" : "FAULT · release requested · verify vendor control");
+                        ? "NOT STARTED · no software speed ownership established" : "PAUSED · controller fault: " + e.Message + " · captured duty requested; verify cooling");
                     Fans.Clear(); FanCommands.Clear();
                     break;
                 }

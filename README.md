@@ -179,3 +179,9 @@ unhandled .NET exception / Windows error dialog. `--verify-error-reporting` is a
 intentional failing-runner check, not the normal test command.
 See [VALIDATION.txt](VALIDATION.txt) for test evidence and limitations.
 GPL-3.0-or-later; see [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
+
+Cooling sensor reads use a dedicated sampler with start-to-start intervals. Slow
+reads do not add a full polling delay. The five-second stale-data guard still
+pauses cooling control; port status includes the shared cause. The last fault's
+reason, sample age and sampler timing are kept in
+`%LOCALAPPDATA%\ThermalDesk\last-controller-fault.json` (one overwritten file).

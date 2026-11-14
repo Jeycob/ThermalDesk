@@ -9,6 +9,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        if (args.Length == 2 && args[0] == "--sampler-check") return SensorCadenceChecks.Run(Path.GetFullPath(args[1]));
         try { StartupManager.WaitForPrevious(args); }
         catch (Exception error) { MessageBox.Show(error.Message, "ThermalDesk restart blocked"); return 1; }
         if (args.Length == 2 && args[0] == "--widget-check") return WidgetChecks.Run(Path.GetFullPath(args[1]));

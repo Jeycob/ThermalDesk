@@ -648,3 +648,10 @@ acceptance tests have passed. Do not delete TT RGB Plus yet.
 - Evidence: work/thermaldesk-0322-complete, thermaldesk-0322-checks-final/
   display-benchmark.json. Not installed on Sklenik; no live fan/RGB/LCD modified.
 
+
+0.3.23 sensor cadence regression (2026-11-14):
+- Sklenik 0.3.22 log at 22:36:21: Controller FAULT LATCHED, Stale telemetry.
+- Original sampler reproduced the same fault with a 2100 ms sensor read plus its extra 2000 ms delay.
+- New sampler uses a dedicated thread and start-to-start deadlines. Nine mock checks pass, including unchanged stale-data latching, causal port status and single release without reconnect.
+- Core checks: 1667 assertions passed. Physical stability after deployment is a separate observation; no sleep/resume or disconnected-hardware guarantee.
+- Full release widget/mock run: 1002 checks and 200 renders passed; dedicated sampler regression: 9 checks passed. No physical USB writes in these checks.
