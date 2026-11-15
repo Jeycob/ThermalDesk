@@ -17,7 +17,7 @@ public sealed class FanSafety
         if (p.Role == PortRole.Unknown) throw new InvalidOperationException("Unknown wiring cannot be controlled.");
         // Zero/sentinel readings from an inaccessible sensor must not look like an idle CPU.
         bool Valid(double? v) => v.HasValue && double.IsFinite(v.Value) && v.Value is >= 5 and <= 115;
-        if (now - t.Time > TimeSpan.FromSeconds(5) || t.Time > now + TimeSpan.FromSeconds(1)) return Release("Stale telemetry");
+        if (!IsFresh(t, now)) return Release("Stale telemetry");
         if (IsCritical(t, now)) return Full("Critical temperature");
         if (!Valid(t.CpuTemperature)) return Release("CPU sensor unavailable");
         double? temperature = p.Source switch
@@ -58,10 +58,12 @@ public sealed class FanSafety
     }
     private FanDecision Full(string reason) { previous = 100; heldTemperature = null; riseSince = null; return new(100, reason) { TargetDuty = 100 }; }
     private FanDecision Release(string reason) => new(null, reason + " · release software control; do not force full speed");
+    public static bool IsFresh(Telemetry t, DateTimeOffset now) =>
+        now - t.Time <= TimeSpan.FromSeconds(5) && t.Time - now <= TimeSpan.FromSeconds(1);
     public static bool IsCritical(Telemetry t, DateTimeOffset now)
     {
         bool ValidHot(double? value) => value.HasValue && double.IsFinite(value.Value) && value.Value is >= 85 and <= 115;
-        return now - t.Time <= TimeSpan.FromSeconds(5) && t.Time - now <= TimeSpan.FromSeconds(1) &&
+        return IsFresh(t, now) &&
             (ValidHot(t.CpuTemperature) || ValidHot(t.CpuMaximumTemperature) || ValidHot(t.GpuTemperature));
     }
     public void Reset() { previous = heldTemperature = null; riseSince = null; }

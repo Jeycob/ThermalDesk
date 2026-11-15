@@ -48,9 +48,10 @@ internal sealed class FrameRenderer : IDisposable
     internal static string? VisualKey(Telemetry telemetry, DisplaySettings settings, OnlineMediaCache? online = null)
     {
         if (settings.Content != DisplayContent.Dashboard) return null; // live capture / animated media must advance
-        if (!settings.UseCustomLayout) return $"{telemetry.CpuTemperature:R}|{telemetry.GpuTemperature:R}|{telemetry.MemoryUsedPercent:R}|{DateTime.Now:yyyyMMddHHmmss}";
-        return WidgetRotation.ActiveGroup(settings, telemetry.Time) + "|" + string.Join('\u001f', WidgetRotation.Visible(settings, telemetry.Time).Select(w =>
-            (w.Kind == WidgetKind.OnlineImage ? "image:" + (online?.Revision(w) ?? 0) + ":age:" + telemetry.Time.ToUnixTimeSeconds() / 5 : WidgetLayout.Format(w, telemetry)) +
+        string freshness = FreshnessStatus(telemetry, settings);
+        if (!settings.UseCustomLayout) return $"{telemetry.CpuTemperature:R}|{telemetry.GpuTemperature:R}|{telemetry.MemoryUsedPercent:R}|{telemetry.PresentationTime:yyyyMMddHHmmss}|{freshness}";
+        return freshness + "|" + WidgetRotation.ActiveGroup(settings, telemetry.PresentationTime) + "|" + string.Join('\u001f', WidgetRotation.Visible(settings, telemetry.PresentationTime).Select(w =>
+            (w.Kind == WidgetKind.OnlineImage ? "image:" + (online?.Revision(w) ?? 0) + ":age:" + telemetry.PresentationTime.ToUnixTimeSeconds() / 5 : WidgetLayout.Format(w, telemetry)) +
             (WidgetLayout.IsGauge(w.Kind) ? "|" + WidgetLayout.GaugeFraction(w, telemetry)?.ToString("R", System.Globalization.CultureInfo.InvariantCulture) : "") +
             (WidgetLayout.IsGraph(w.Kind) ? "|history:" + telemetry.History.Revision : "")));
     }
@@ -102,8 +103,10 @@ internal sealed class FrameRenderer : IDisposable
             }
             if (settings.Content == DisplayContent.Dashboard || settings.Overlay)
             {
-                if (settings.UseCustomLayout) DrawWidgets(g, t, WidgetRotation.Visible(settings, t.Time), online);
+                if (settings.UseCustomLayout) DrawWidgets(g, t, WidgetRotation.Visible(settings, t.PresentationTime), online);
                 else DrawMetrics(g, t, w, h, settings.Content != DisplayContent.Dashboard);
+                string freshness = FreshnessStatus(t, settings);
+                if (freshness.Length > 0) DrawFreshness(g, freshness, w, h);
             }
         }
         canvas.RotateFlip(settings.Rotation switch { 90 => RotateFlipType.Rotate90FlipNone, 180 => RotateFlipType.Rotate180FlipNone, 270 => RotateFlipType.Rotate270FlipNone, _ => RotateFlipType.RotateNoneFlipNone });
@@ -112,6 +115,22 @@ internal sealed class FrameRenderer : IDisposable
         catch { canvas.Dispose(); throw; }
     }
     internal static Color ParseColor(string value) => ColorTranslator.FromHtml("#" + value.TrimStart('#'));
+    internal static string FreshnessStatus(Telemetry t, DisplaySettings settings) =>
+        settings.UseCustomLayout && !WidgetRotation.Visible(settings, t.PresentationTime).Any(TelemetryFreshness.UsesSensorSample)
+            ? "" : TelemetryFreshness.Status(t, t.PresentationTime);
+    private void DrawFreshness(Graphics graphics, string status, int width, int height)
+    {
+        using var dim = new SolidBrush(Color.FromArgb(105, 10, 17, 29));
+        graphics.FillRectangle(dim, 0, 0, width, height);
+        int strip = Math.Min(30, height);
+        // A centred warning stays inside both the rectangular and round LCD crop.
+        var box = new Rectangle(0, (height - strip) / 2, width, strip);
+        using var background = new SolidBrush(Color.FromArgb(240, 10, 17, 29));
+        using var ink = new SolidBrush(Color.FromArgb(255, 194, 100));
+        graphics.FillRectangle(background, box);
+        using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
+        graphics.DrawString(status, FontFor("Segoe UI", 14, FontStyle.Bold, GraphicsUnit.Pixel), ink, box, format);
+    }
     internal static string FormatTemperature(double? value) => value.HasValue && double.IsFinite(value.Value) ? $"{value:0} °C" : "—";
     private void DrawWidgets(Graphics g, Telemetry t, IEnumerable<LcdWidget> widgets, OnlineMediaCache? online)
     {
@@ -127,7 +146,7 @@ internal sealed class FrameRenderer : IDisposable
                 if (widget.Background.Length > 0) { using var bg = new SolidBrush(ParseColor(widget.Background)); g.FillRectangle(bg, box); }
                 if (widget.Kind == WidgetKind.OnlineImage)
                 {
-                    string status = online?.Draw(g, widget, box, t.Time) ?? "Online source · Live only";
+                    string status = online?.Draw(g, widget, box, t.PresentationTime) ?? "Online source · Live only";
                     if (status.Length > 0)
                     {
                         using var shade = new SolidBrush(Color.FromArgb(210, 10, 17, 29));
@@ -182,7 +201,7 @@ internal sealed class FrameRenderer : IDisposable
         var tiny = FontFor(widget.FontFamily, 8, FontStyle.Regular, GraphicsUnit.Pixel);
         using var textFormat = new StringFormat { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
         if (labels) g.DrawString(WidgetLayout.Format(widget, telemetry), font, ink, new RectangleF(box.X + 2, box.Y, box.Width - 4, 19), textFormat);
-        var buckets = GraphProjection.Build(telemetry.History, widget.Source, telemetry.Time, widget.GraphMinutes, (int)Math.Min(240, area.Width), widget.Port);
+        var buckets = GraphProjection.Build(telemetry.History, widget.Source, telemetry.PresentationTime, widget.GraphMinutes, (int)Math.Min(240, area.Width), widget.Port);
         if (buckets.Count == 0)
         {
             g.DrawString("Waiting for history", tiny, muted, area, textFormat); return;
@@ -309,7 +328,7 @@ internal sealed class FrameRenderer : IDisposable
             Center(FormatTemperature(t.CpuTemperature), number, Brushes.White, cy - 73 * s);
             Center("GPU  " + FormatTemperature(t.GpuTemperature), detail, ink, cy + 44 * s);
             Center($"MEMORY  {t.MemoryUsedPercent:0}%", title, ink, cy + 86 * s);
-            Center(DateTime.Now.ToString("HH:mm:ss"), clock, teal, cy + 125 * s);
+            Center(t.PresentationTime.LocalDateTime.ToString("HH:mm:ss"), clock, teal, cy + 125 * s);
             return;
         }
         float scale = Math.Min(w / 480f, h / 128f);
@@ -331,7 +350,7 @@ internal sealed class FrameRenderer : IDisposable
             g.FillRectangle(track, x, y + 59 * scale, cell - 28, 3);
             if (values[i].HasValue) g.FillRectangle(accent, x, y + 59 * scale, (float)Math.Clamp(values[i]!.Value / 100, 0, 1) * (cell - 28), 3);
         }
-        g.DrawString(DateTime.Now.ToString("HH:mm:ss"), small, muted, 16, h - 23);
+        g.DrawString(t.PresentationTime.LocalDateTime.ToString("HH:mm:ss"), small, muted, 16, h - 23);
     }
     public static byte[] Jpeg(Bitmap bitmap)
     {

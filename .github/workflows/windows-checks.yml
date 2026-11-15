@@ -1,0 +1,49 @@
+name: Windows build and offline checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-checks:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Build, test fake devices, and publish portable files
+        run: ./build.ps1 -Portable -OfflineChecks
+      - name: Verify package versions and create archives
+        run: ./package.ps1
+      - name: Keep test reports and rendered UI
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: offline-checks-${{ github.sha }}
+          path: artifacts/checks/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Keep validated portable and source archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packages-${{ github.sha }}
+          path: |
+            artifacts/*.zip
+            artifacts/SHA256.json
+          if-no-files-found: error
+          retention-days: 14

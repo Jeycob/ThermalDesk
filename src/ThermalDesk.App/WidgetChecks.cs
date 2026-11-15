@@ -54,6 +54,10 @@ internal static class WidgetChecks
             count += LogAndPerformanceChecks.Run(directory);
             count += PowerGraphChecks.Run(directory);
             count += PresentationChecks.Run(directory);
+            count += ControllerReliabilityChecks.Run();
+            count += EditorRegressionChecks.Run(directory);
+            count += ReliabilityChecks.Run();
+            count += TelemetryPresentationChecks.Run(directory);
             foreach (var shape in new[] { (Width: 480, Height: 128), (Width: 480, Height: 480) })
             {
                 using var editor = new DisplayEditor("Offline preset checks", new DisplaySettings { Brightness = 43, FramesPerSecond = 3 }, shape.Width, shape.Height, () => t);
@@ -197,6 +201,10 @@ internal static class WidgetChecks
             using (var controller = new FanController(transport, 65))
             { controller.SetDuty(1, 60); controller.SetDuty(1, 70); controller.PrepareToClose(false); }
             Check(transport.Duties.SequenceEqual(new[] { 60, 70, 40 }), "Stop restores captured duty; never injects fallback 100%");
+            var baselineOnly = new TestFanLink();
+            using (var controller = new FanController(baselineOnly, 65))
+            { controller.CaptureBaseline(1); controller.PrepareToClose(true); }
+            Check(baselineOnly.Duties.Count == 0, "Capturing a baseline without a speed write does not acquire restoration or emergency ownership");
             var emergency = new TestFanLink();
             using (var controller = new FanController(emergency, 65))
             { controller.SetDuty(1, 60); controller.PrepareToClose(true); }
@@ -497,9 +505,10 @@ internal static class WidgetChecks
     private sealed class TestController : IFanController
     {
         public int DutyWrites, LightingFrames, BlackFrames, LastDuty, FirstDuty = -1;
-        public void SetDuty(int port, int duty) { Interlocked.Increment(ref DutyWrites); Interlocked.CompareExchange(ref FirstDuty, duty, -1); LastDuty = duty; }
+        private readonly Dictionary<int, int> duties = [];
+        public void SetDuty(int port, int duty) { duties[port] = duty; Interlocked.Increment(ref DutyWrites); Interlocked.CompareExchange(ref FirstDuty, duty, -1); LastDuty = duty; }
         public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) { Interlocked.Increment(ref LightingFrames); if (colors.All(c => c == new LedColor(0, 0, 0))) Interlocked.Increment(ref BlackFrames); }
-        public FanReading Read(int port) => new(port, 1200 + port * 100, 40);
+        public FanReading Read(int port) => new(port, 1200 + port * 100, duties.GetValueOrDefault(port, 40));
         public void PrepareToClose(bool criticalTemperature) { }
         public void Dispose() { }
     }

@@ -1,3 +1,28 @@
+ThermalDesk 0.3.25 — reliability and UI audit fixes — 2026-11-15
+
+- Windows x64, private Microsoft .NET SDK 10.0.404, SHA-512 verified against
+  Microsoft's release metadata; Release build: zero warnings/errors.
+- 1710 hardware-independent Core assertions passed.
+- 1108 offline application assertions passed, including ignored duty, bounded
+  retry, moving targets, slow feedback, critical startup, stale readback,
+  page hit testing, lost mouse capture, pump limits, GPU query recovery,
+  startup task ownership, stale presentation and profile-save failures.
+- 9 sampler checks and 44 mocked startup migration assertions passed.
+- 200 widget render iterations: GDI objects 80 -> 80.
+- Main UI at default/minimum size, editor pages/effective curves, and stale
+  round-LCD warning rendered and inspected. Cooling footer controls fit their
+  content; summary columns retain readable feedback. Other DPI scales were
+  not tested in this run.
+- Portable 0.3.25 publish succeeded. NuGet restore used the committed lockfile
+  and packages downloaded from the official NuGet feed into a local feed;
+  NuGet vulnerability audit was explicitly skipped due to environment TLS.
+- No physical USB device, sensor driver, active startup registration or real
+  cooling/RGB/LCD write was used. Readback timing/tolerance still requires
+  attended acceptance with supported controller firmware. No installer or
+  unattended-cooling acceptance is claimed for these changes.
+- Windows CI now runs the offline checks and validates packaged versions;
+  remote CI status is separate from the local results recorded here.
+
 UNRELEASED FOLLOW-UP — Strata AI log support — 2026-11-13
 - Private .NET SDK 10.0.404; Release application build: zero warnings/errors.
 - 1637 hardware-independent core assertions passed.

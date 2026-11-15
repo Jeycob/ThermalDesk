@@ -8,7 +8,7 @@ using ThermalDesk.Core;
 
 namespace ThermalDesk.App;
 
-internal sealed class MainForm : Form
+internal sealed partial class MainForm : Form
 {
     private static readonly Color Background = Color.FromArgb(10, 17, 29), Surface = Color.FromArgb(22, 34, 48), Accent = Color.FromArgb(38, 218, 179), Muted = Color.FromArgb(151, 172, 191);
     private readonly Engine engine;
@@ -18,10 +18,16 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
     private readonly System.Windows.Forms.Timer settingsDelay = new() { Interval = 450 };
     private string applyHint = "";
+    private bool applyFailed;
+    private bool persistenceFailed;
+    private bool attentionOpensCooling;
     private readonly Icon appIcon = AppIcon.Create();
     private readonly NotifyIcon tray = new() { Text = "ThermalDesk" };
     private readonly ToolTip hints = new() { AutoPopDelay = 20000, InitialDelay = 450, ReshowDelay = 100, ShowAlways = true };
     private readonly Label session = new(), resources = new(), cpu = new(), gpu = new(), memory = new();
+    private readonly Label profileStatus = new() { AutoSize = true, ForeColor = Muted };
+    private readonly LinkLabel attention = new() { AutoSize = true, LinkColor = Color.FromArgb(255, 194, 100), ActiveLinkColor = Color.White, VisitedLinkColor = Color.FromArgb(255, 194, 100) };
+    private readonly CheckBox advancedPorts = new() { Text = "Advanced port columns", AutoSize = true, AccessibleName = "Show advanced port configuration columns" };
     private readonly TextBox deviceStatus = new(), log = new(), color = new(), serial = new();
     private readonly PictureBox panelPreview = new(), aioPreview = new();
     private readonly DataGridView ports = new BufferedDataGridView();
@@ -76,21 +82,23 @@ internal sealed class MainForm : Form
         Font = new Font("Segoe UI", 10); ClientSize = new Size(1180, 820); MinimumSize = new Size(1000, 720);
         StartPosition = FormStartPosition.CenterScreen;
         var shell = new BufferedTableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(22), RowCount = 5, ColumnCount = 1 };
-        shell.RowStyles.Add(new(SizeType.Absolute, 66)); shell.RowStyles.Add(new(SizeType.Absolute, 52));
-        shell.RowStyles.Add(new(SizeType.Absolute, 36)); shell.RowStyles.Add(new(SizeType.Percent, 100)); shell.RowStyles.Add(new(SizeType.Absolute, 30));
+        shell.RowStyles.Add(new(SizeType.Absolute, 58)); shell.RowStyles.Add(new(SizeType.AutoSize));
+        shell.RowStyles.Add(new(SizeType.AutoSize)); shell.RowStyles.Add(new(SizeType.Percent, 100)); shell.RowStyles.Add(new(SizeType.Absolute, 30));
         Controls.Add(shell);
-        shell.Controls.Add(new Label { Text = "THERMALDESK  /  Hardware, without the overhead", ForeColor = Accent, Font = new Font(Font.FontFamily, 21, FontStyle.Bold), AutoSize = true, Padding = new Padding(0, 10, 0, 0) }, 0, 0);
-        var tools = new BufferedFlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        shell.Controls.Add(new Label { Text = "THERMALDESK  /  Temperatures, cooling and displays", ForeColor = Accent, Font = new Font(Font.FontFamily, 18, FontStyle.Bold), AutoSize = true, Padding = new Padding(0, 10, 0, 0) }, 0, 0);
+        var tools = new BufferedFlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
         tools.Controls.Add(Button("Preview", async () => await Switch(false)));
         liveButton = Button("Start live control", async () => await Switch(true), true); tools.Controls.Add(liveButton);
         tools.Controls.Add(Button("Stop", async () => await Run(async () => await engine.Stop())));
-        tools.Controls.Add(Button("Save now", () => { settings = ReadSettings(); SettingsStore.Save(configPath, settings); Info("Your profile is saved. Valid edits already save and apply automatically; Stop / Start is not needed for curves, RGB or widgets."); }));
-        tools.Controls.Add(Button("Import / export", ProfileMenu));
-        tools.Controls.Add(Button("Start at sign-in", ConfigureStartup));
+        tools.Controls.Add(Button("Profile…", ProfileMenu));
         if (!StartupManager.Elevated) tools.Controls.Add(Button("Restart as admin", async () => await RestartElevated()));
         shell.Controls.Add(tools, 0, 1);
-        session.AutoSize = false; session.Dock = DockStyle.Fill; session.AutoEllipsis = true; session.TextAlign = ContentAlignment.MiddleLeft;
-        session.ForeColor = Muted; shell.Controls.Add(session, 0, 2);
+        session.AutoSize = false; session.Dock = DockStyle.Fill; session.Height = 28; session.AutoEllipsis = true; session.TextAlign = ContentAlignment.MiddleLeft;
+        var statusLayout = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 1, RowCount = 3, Margin = new Padding(3, 0, 3, 8) };
+        statusLayout.RowStyles.Add(new(SizeType.Absolute, 28)); statusLayout.RowStyles.Add(new(SizeType.AutoSize)); statusLayout.RowStyles.Add(new(SizeType.AutoSize));
+        session.ForeColor = Muted; statusLayout.Controls.Add(session, 0, 0); statusLayout.Controls.Add(profileStatus, 0, 1); statusLayout.Controls.Add(attention, 0, 2);
+        statusLayout.SizeChanged += (_, _) => { profileStatus.MaximumSize = attention.MaximumSize = new Size(Math.Max(100, statusLayout.ClientSize.Width - 12), 0); };
+        shell.Controls.Add(statusLayout, 0, 2);
         var tabs = new ThemedTabControl { Dock = DockStyle.Fill, Padding = new Point(18, 8) };
         shell.Controls.Add(tabs, 0, 3);
         var dashboard = Page(tabs, "Overview");
@@ -110,13 +118,17 @@ internal sealed class MainForm : Form
         ConfigureText(deviceStatus); layout.Controls.Add(Group("Device state / safety", deviceStatus), 0, 2);
         var coolingPage = Page(tabs, "Cooling + RGB");
         var coolingLayout = new BufferedTableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, Padding = new Padding(12) };
-        coolingLayout.RowStyles.Add(new(SizeType.Absolute, 65)); coolingLayout.RowStyles.Add(new(SizeType.Absolute, 64)); coolingLayout.RowStyles.Add(new(SizeType.Percent, 100)); coolingLayout.RowStyles.Add(new(SizeType.Absolute, 80));
+        coolingLayout.ColumnStyles.Add(new(SizeType.Percent, 100));
+        coolingLayout.RowStyles.Add(new(SizeType.AutoSize)); coolingLayout.RowStyles.Add(new(SizeType.AutoSize)); coolingLayout.RowStyles.Add(new(SizeType.Percent, 100)); coolingLayout.RowStyles.Add(new(SizeType.AutoSize));
         coolingPage.Controls.Add(coolingLayout);
-        coolingLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Color.FromArgb(255, 194, 100), Text = "Identify wiring and keep independent thermal protection. Software cannot guarantee protection after a crash, USB loss or before sign-in.\nCurve/RGB changes apply automatically. Stop restores captured duties, not forced full speed. This is not BIOS hand-back." }, 0, 0);
-        var flags = new BufferedFlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
-        cooling.AutoSize = wiring.AutoSize = rgb.AutoSize = true; flags.Controls.AddRange([cooling, rgb, monitorFans, wiring]); coolingLayout.Controls.Add(flags, 0, 1);
+        var coolingNotice = new Label { AutoSize = true, ForeColor = Color.FromArgb(255, 194, 100), Margin = new Padding(3, 3, 3, 12), Text = "Identify wiring and keep independent thermal protection. Software cannot guarantee protection after a crash, USB loss or before sign-in.\nStop requests captured duties back; it does not hand control to the BIOS." };
+        coolingLayout.SizeChanged += (_, _) => coolingNotice.MaximumSize = new Size(Math.Max(100, coolingLayout.ClientSize.Width - 36), 0);
+        coolingLayout.Controls.Add(coolingNotice, 0, 0);
+        var flags = new BufferedFlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
+        cooling.AutoSize = wiring.AutoSize = rgb.AutoSize = true; flags.Controls.AddRange([cooling, rgb, monitorFans, wiring, advancedPorts]); coolingLayout.Controls.Add(flags, 0, 1);
+        advancedPorts.CheckedChanged += (_, _) => SetAdvancedPortColumns(advancedPorts.Checked);
         BuildPorts(); coolingLayout.Controls.Add(ports, 0, 2);
-        var extras = new BufferedFlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 8, 0, 0) };
+        var extras = new BufferedFlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Padding = new Padding(0, 8, 0, 0), Name = "CoolingActions" };
         color.Width = 100; serial.Width = 190;
         extras.Controls.AddRange([new Label { Text = "Default RGB color", AutoSize = true }, color, Button("Choose default…", PickColor), new Label { Text = "Controller serial (optional)", AutoSize = true }, serial]);
         extras.Controls.Add(new Label { Text = "Managed fans:", AutoSize = true });
@@ -134,7 +146,7 @@ internal sealed class MainForm : Form
         var displayLayout = new BufferedTableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(12) };
         displayLayout.ColumnStyles.Add(new(SizeType.Percent, 50)); displayLayout.ColumnStyles.Add(new(SizeType.Percent, 50));
         displayLayout.RowStyles.Add(new(SizeType.Percent, 100)); displayLayout.RowStyles.Add(new(SizeType.Absolute, 68)); displays.Controls.Add(displayLayout);
-        panelEditor = new("3.9-inch LCD · 264A:233D", settings.Panel, 480, 128, () => engine.Latest); aioEditor = new("TOUGHLIQUID AX · 264A:2328", settings.Aio, 480, 480, () => engine.Latest);
+        panelEditor = new("3.9-inch LCD · 264A:233D", settings.Panel, 480, 128, () => engine.Latest with { RenderTime = DateTimeOffset.Now }); aioEditor = new("TOUGHLIQUID AX · 264A:2328", settings.Aio, 480, 480, () => engine.Latest with { RenderTime = DateTimeOffset.Now });
         displayLayout.Controls.Add(panelEditor, 0, 0); displayLayout.Controls.Add(aioEditor, 1, 0);
         displayLayout.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Muted, Text = "Edit widgets: pages, gauges, graphs and online JPEG/PNG/MJPEG. Page 0 stays visible; other pages rotate.\nOnline sources fetch only in Live (up to four). Screen mirroring may show private information. No web server or cloud account." }, 0, 1); displayLayout.SetColumnSpan(displayLayout.GetControlFromPosition(0, 1)!, 2);
         var sensorsPage = Page(tabs, "Sensors");
@@ -143,6 +155,7 @@ internal sealed class MainForm : Form
         var preferenceLayout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(24) };
         preferences.Controls.Add(preferenceLayout);
         preferenceLayout.Controls.Add(new Label { Text = "Startup, profile and tray", AutoSize = true, ForeColor = Accent, Font = new Font(Font.FontFamily, 14, FontStyle.Bold), Margin = new Padding(0, 0, 0, 18) });
+        preferenceLayout.Controls.Add(Button("Windows sign-in…", ConfigureStartup));
         resumeLastProfile.Checked = initial.ResumeLastProfileOnLaunch ?? (initial.LastSessionWasLive || initial.StartLiveAtSignIn);
         preferenceLayout.Controls.Add(resumeLastProfile);
         preferenceLayout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(780, 0), ForeColor = Muted, Text = "Load and activate your saved devices when opening the app. Only previously configured outputs are used; this does not add Windows startup. Hold Shift or use --preview to open without hardware access. Recovery and conflicting controller apps still block automatic control.", Margin = new Padding(24, 4, 0, 22) });
@@ -153,7 +166,7 @@ internal sealed class MainForm : Form
         preferenceLayout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(780, 0), ForeColor = Muted, Text = "Hide the window in the system tray after a successful launch. This does not enable Live or Windows sign-in startup. Hold Shift or launch with --show-window to open visibly.", Margin = new Padding(24, 4, 0, 22) });
         preferenceLayout.Controls.Add(minimizeWhenClosed);
         preferenceLayout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(780, 0), ForeColor = Muted, Text = "The window's X / Alt+F4 hides ThermalDesk instead of exiting. Sensors, fans, RGB and LCDs keep running in the same session. To actually quit, right-click the ThermalDesk icon by the clock and choose Exit. Windows shutdown is not treated as hiding.", Margin = new Padding(24, 4, 0, 22) });
-        preferenceLayout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(780, 0), ForeColor = Muted, Text = "Changes save automatically. Double-click the tray icon, or choose Open, to restore the window. Configure automatic Windows launch separately with Start at sign-in." });
+        preferenceLayout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(780, 0), ForeColor = Muted, Text = "Changes save automatically. Double-click the tray icon, or choose Open, to restore the window. Configure automatic Windows launch with Windows sign-in above." });
         technicalDetails.Checked = initial.ShowTechnicalDetails; preferenceLayout.Controls.Add(technicalDetails); TrackSettingsChanges(technicalDetails);
         hints.SetToolTip(technicalDetails, "Show thread and handle counts in the footer. Off by default: the normal view shows just application CPU and memory and skips these extra process queries.");
         hints.SetToolTip(minimizeAfterStartup, "Start hidden by the Windows clock. Does not automatically enable hardware. Explicit OFF also overrides --minimized in older sign-in tasks.");
@@ -189,6 +202,7 @@ internal sealed class MainForm : Form
         var activityLayout = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18) }; activityPage.Controls.Add(activityLayout);
         ConfigureText(processActivityLog); activityLayout.Controls.Add(processActivityLog); activityLayout.Controls.Add(processActivityStatus);
         var logsPage = Page(tabs, "Log + diagnostics"); ConfigureText(log); logsPage.Controls.Add(log);
+        attention.LinkClicked += (_, _) => tabs.SelectedTab = attentionOpensCooling ? coolingPage : logsPage;
         if (startupWarning.Length > 0) log.Text = "STARTUP RECOVERY: " + startupWarning + Environment.NewLine;
         var diag = Button("Export diagnostics", ExportDiagnostics); diag.Dock = DockStyle.Bottom; logsPage.Controls.Add(diag); diag.BringToFront();
         var about = Page(tabs, "About");
@@ -247,8 +261,8 @@ internal sealed class MainForm : Form
                 "Start live control" => "Starts the enabled devices after confirmation. Later valid edits apply automatically; do not repeatedly stop/start for color or curve changes.",
                 "Stop" => "Releases managed devices and restores captured fan duties, not forced full speed. This is not a BIOS hand-back.",
                 "Save now" => "Optional immediate save. Valid edits are already saved automatically after a short pause; you do not need Stop / Start to apply them.",
-                "Import / export" => "Load a profile into this window immediately, export a JSON copy, or open the profile folder. Import keeps a dated backup and does not change Windows startup.",
-                "Start at sign-in" => "Choose disabled, Preview, or elevated saved-live startup. Existing task settings are not silently enabled by installation.",
+                "Profile…" => "Load a profile into this window immediately, export a JSON copy, or open the profile folder. Import keeps a dated backup and does not change Windows startup.",
+                "Windows sign-in…" => "Choose disabled, Preview, or elevated saved-live startup. Existing task settings are not silently enabled by installation.",
                 _ => tool.Text
             });
     }
@@ -279,10 +293,12 @@ internal sealed class MainForm : Form
             { e.Value = $"{number} · {p.Name}"; e.FormattingApplied = true; }
         };
         ports.Dock = DockStyle.Fill; ports.AllowUserToAddRows = ports.AllowUserToDeleteRows = false; ports.RowHeadersVisible = false; ports.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        ports.MultiSelect = false; ports.SelectionMode = DataGridViewSelectionMode.FullRowSelect; ports.AccessibleName = "Cooling ports and controller feedback";
         ports.BackgroundColor = Surface; ports.BorderStyle = BorderStyle.None; ports.DefaultCellStyle.BackColor = Surface; ports.DefaultCellStyle.ForeColor = Color.White;
         ports.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
         ports.DefaultCellStyle.SelectionBackColor = Color.FromArgb(36, 81, 93); ports.EnableHeadersVisualStyles = false;
         ports.ColumnHeadersDefaultCellStyle.BackColor = Background; ports.ColumnHeadersDefaultCellStyle.ForeColor = Muted; ports.RowTemplate.Height = 34;
+        ports.ColumnHeadersDefaultCellStyle.SelectionBackColor = Background; ports.ColumnHeadersDefaultCellStyle.SelectionForeColor = Muted;
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Port", ReadOnly = true, FillWeight = 85 });
         foreach (var pair in new[] { ("Role", Enum.GetNames<PortRole>()), ("Mode", Enum.GetNames<ControlMode>()), ("Source", Enum.GetNames<TemperatureSource>()) })
             ports.Columns.Add(new DataGridViewComboBoxColumn { Name = pair.Item1, DataSource = pair.Item2, FlatStyle = FlatStyle.Flat, FillWeight = pair.Item1 == "Source" ? 100 : 75 });
@@ -295,6 +311,10 @@ internal sealed class MainForm : Form
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Requested", HeaderText = "Request → target %", ReadOnly = true, FillWeight = 85, ToolTipText = "Current command → curve target. Automatic fan rises wait 4 seconds, then ramp by 3 percentage points/second. Critical heat responds immediately. Percentages are not RPM or watts." });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Reported", HeaderText = "Reported %", ReadOnly = true, FillWeight = 55, ToolTipText = "Duty returned by the controller, not an independent measurement of electrical power." });
         ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "RPM", HeaderText = "RPM", ReadOnly = true, FillWeight = 50, ToolTipText = "Tachometer feedback in revolutions per minute; unavailable after Stop or a controller fault." });
+        ports.Columns.Add(new DataGridViewTextBoxColumn { Name = "Lighting", HeaderText = "Lighting", ReadOnly = true, FillWeight = 100, ToolTipText = "Unmanaged, explicitly off, or the selected effect. Open Edit to change lighting independently from fan speed." });
+        ports.Columns[0].HeaderText = "Port / location"; ports.Columns[0].FillWeight = 140;
+        foreach (DataGridViewColumn column in ports.Columns) column.MinimumWidth = column.Index is 0 or 8 or 10 or 13 ? 110 : 62;
+        SetAdvancedPortColumns(false);
         var help = new[]
         {
             "Physical controller port, not a motherboard fan header. Edit to add a friendly name.",
@@ -315,6 +335,8 @@ internal sealed class MainForm : Form
             e.ToolTipText = ports.Columns[e.ColumnIndex].ToolTipText;
             if (e.ColumnIndex == 6 && e.RowIndex >= 0 && portDesign.TryGetValue(Convert.ToInt32(ports.Rows[e.RowIndex].Cells[0].Value), out var port))
                 e.ToolTipText = $"Current selection: {Lighting.StateLabel(port)}.\n" + e.ToolTipText;
+            if (e.ColumnIndex is 10 or 11 && e.RowIndex >= 0)
+                e.ToolTipText = ports.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText;
         };
         foreach (var p in settings.Ports) ports.Rows.Add(p.Port, p.Role.ToString(), p.Mode.ToString(), p.Source.ToString(), p.MinimumDuty, p.FixedDuty, p.Rgb, p.LedCount, string.Join(';', p.Curve.Select(x => $"{x.Temperature.ToString(CultureInfo.InvariantCulture)}:{x.Duty.ToString(CultureInfo.InvariantCulture)}")));
         ports.DataError += (_, e) => { e.ThrowException = false; };
@@ -329,6 +351,22 @@ internal sealed class MainForm : Form
             }
             catch (Exception error) { Error(error); }
         };
+    }
+    private void SetAdvancedPortColumns(bool advanced)
+    {
+        int[] summary = [0, 2, 13, 12, 10, 11, 9];
+        foreach (DataGridViewColumn column in ports.Columns) column.Visible = advanced || summary.Contains(column.Index);
+        if (advanced)
+        {
+            foreach (DataGridViewColumn column in ports.Columns) { column.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill; column.DisplayIndex = column.Index; }
+        }
+        else
+        {
+            foreach (var (index, width) in new[] { (2, 100), (13, 130), (12, 72), (10, 126), (11, 82), (9, 82) })
+            { ports.Columns[index].AutoSizeMode = DataGridViewAutoSizeColumnMode.None; ports.Columns[index].Width = width; }
+            ports.Columns[0].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            for (int index = summary.Length - 1; index >= 0; index--) ports.Columns[summary[index]].DisplayIndex = 0;
+        }
     }
     private void AcceptPortEditorResult(DataGridViewRow row, PortSettings value)
     {
@@ -434,17 +472,28 @@ internal sealed class MainForm : Form
         if (busy || exiting) { if (!exiting) settingsDelay.Start(); return; }
         try
         {
+            persistenceFailed = false;
             var next = ReadSettings();
             if (engine.Running && engine.Live) engine.ApplyLiveSettings(next);
-            settings = next; SettingsStore.Save(configPath, next);
+            // The in-memory profile tracks what the engine accepted, even when
+            // persistence fails. Never label an already applied change "pending".
+            settings = next;
+            try { SettingsStore.Save(configPath, next); }
+            catch (Exception error)
+            {
+                applyHint = (engine.Running && engine.Live ? "Applied to devices" : "Preview updated") + " · NOT SAVED: " + error.Message;
+                applyFailed = persistenceFailed = true; RefreshData(); return;
+            }
             applyHint = engine.Live ? "Changes applied automatically · no controller restart" : "Profile saved · preview updated";
+            applyFailed = false;
             RefreshData();
         }
-        catch (Exception error) { applyHint = "Pending · " + error.Message; RefreshData(); }
+        catch (Exception error) { applyHint = "Pending · " + error.Message; applyFailed = true; RefreshData(); }
     }
     private void RefreshData()
     {
-        var t = engine.Latest;
+        var t = engine.Latest with { RenderTime = DateTimeOffset.Now };
+        bool stale = engine.Live && TelemetryFreshness.IsStale(t, t.PresentationTime);
         if (processActivityStatus.Visible)
             SetText(processActivityStatus, "CPU: " + (t.TopCpuProcess?.Summary ?? "—") + "\nGPU: " + (t.TopGpuProcess?.Summary ?? "—") + (t.TopGpuProcess is { } top ? " · " + top.Engine : "") +
                 "\n" + t.ProcessMonitorStatus + "\n" + (!engine.Live ? "Preview: no process sampling. Enable in Settings, then use Live." : "Sample: " + (t.ProcessSampleTime == DateTimeOffset.MinValue ? "waiting" : t.ProcessSampleTime.LocalDateTime.ToString("HH:mm:ss"))));
@@ -454,17 +503,32 @@ internal sealed class MainForm : Form
         SetText(cpu, engine.Live && !t.CpuTemperature.HasValue && !StartupManager.Elevated ? "CPU\nUnavailable · restart as admin" : $"CPU\n{Temp(t.CpuTemperature)}   ·   {Load(t.CpuLoad)}");
         SetText(gpu, $"GPU\n{Temp(t.GpuTemperature)}   ·   {Load(t.GpuLoad)}");
         SetText(memory, $"MEMORY\n{(t.MemoryUsedPercent.HasValue ? $"{t.MemoryUsedPercent:0}% physical used" : "Unavailable")}");
+        if (stale)
+        {
+            SetText(cpu, "CPU\nLast sample · " + Temp(t.CpuTemperature));
+            SetText(gpu, "GPU\nLast sample · " + Temp(t.GpuTemperature));
+            SetText(memory, "MEMORY\nLast sample · " + (t.MemoryUsedPercent.HasValue ? $"{t.MemoryUsedPercent:0}%" : "Unavailable"));
+        }
+        cpu.ForeColor = gpu.ForeColor = memory.ForeColor = stale ? Muted : Color.White;
         if (sensorSelector.Visible) sensorSelector.UpdateTelemetry();
         string sessionText = engine.Cancelled ? "CONTROL PAUSED · see Log + diagnostics, then Stop before reconnecting" : engine.Running ? (engine.Live ? "RUNNING · saved devices active · valid edits apply automatically" : "PREVIEW · sample values only · devices are not controlled") : "STOPPED · your saved profile is loaded; devices are not controlled";
         if (engine.Running && engine.Live && settings.AllowMonitoringOnly && !settings.HasUsbSelection) sessionText = "MONITORING ONLY · real sensors/processes · no USB outputs selected";
         if (engine.Running && !engine.Live && settings.StartLiveAtSignIn && !settings.HasLiveSelection)
             sessionText = "PREVIEW · no live output selected · automatic Live is paused";
-        session.ForeColor = engine.Live ? Color.FromArgb(255, 194, 100) : Accent;
+        session.ForeColor = engine.ControllerFault || engine.Cancelled ? Color.FromArgb(255, 194, 100) : Accent;
         SetText(liveButton, engine.Running && engine.Live ? "Running · automatic" : settings.AllowMonitoringOnly && !settings.HasUsbSelection ? "Start monitoring" : "Start live control");
         liveButton.Enabled = !engine.Running || !engine.Live;
         if (engine.ControllerFault) sessionText = "CONTROLLER BLOCKED / FAULT · see log · verify vendor control";
-        if (applyHint.Length > 0) sessionText += " · " + applyHint;
-        if (startupWarning.Length > 0) { sessionText += " · PROFILE RECOVERY · review Log before enabling devices"; session.ForeColor = Color.Orange; }
+        if (startupWarning.Length > 0) { sessionText += " · PROFILE RECOVERY"; session.ForeColor = Color.Orange; }
+        SetText(profileStatus, applyHint.Length == 0 ? "Profile loaded · valid edits save automatically" : applyHint);
+        profileStatus.ForeColor = applyFailed ? Color.FromArgb(255, 194, 100) : Muted;
+        string action = engine.ControllerFault && engine.Status.TryGetValue("Controller", out var controllerStatus) ? controllerStatus + " · Open diagnostics"
+            : startupWarning.Length > 0 ? startupWarning + " · Open diagnostics"
+            : stale ? TelemetryFreshness.Status(t, t.PresentationTime) + " · Open diagnostics"
+            : persistenceFailed ? "Profile is not saved. Check the path and available disk space · Open diagnostics"
+            : applyFailed ? "Review the pending setting above · Open cooling settings" : "";
+        attentionOpensCooling = !engine.ControllerFault && startupWarning.Length == 0 && !stale && applyFailed && !persistenceFailed;
+        SetText(attention, action); attention.Visible = action.Length > 0;
         panelEditor.UpdateConnectionStatus(engine.Status.TryGetValue("480×128 panel", out var panelStatus) ? panelStatus : "Offline editor · hardware is opened only in a live session");
         aioEditor.UpdateConnectionStatus(engine.Status.TryGetValue("TOUGHLIQUID AX", out var aioStatus) ? aioStatus : "Offline editor · hardware is opened only in a live session");
         if (deviceStatus.Visible) UpdateReadOnlyText(deviceStatus, string.Join(Environment.NewLine + Environment.NewLine, engine.Status.OrderBy(x => x.Key).Select(x => x.Key + "\r\n" + x.Value)) + "\r\n\r\n" + string.Join("\r\n", engine.Fans.Values.OrderBy(x => x.Port).Select(x => $"Port {x.Port}: {x.Rpm} RPM / reported {x.Duty}%")));
@@ -475,12 +539,16 @@ internal sealed class MainForm : Form
             bool hasReading = engine.Fans.TryGetValue(port, out var reading);
             void Update(int column, string value) { if (!Equals(row.Cells[column].Value, value)) row.Cells[column].Value = value; }
             Update(10, requested); Update(11, hasReading ? reading!.Duty.ToString(CultureInfo.InvariantCulture) : "—"); Update(12, hasReading ? reading!.Rpm.ToString(CultureInfo.InvariantCulture) : "—");
+            if (portDesign.TryGetValue(port, out var portSettings))
+                Update(13, !rgb.Checked && Lighting.IsManaged(portSettings) ? "Paused by master" : Lighting.StateLabel(portSettings));
+            string feedback = engine.Status.TryGetValue($"Port {port}", out var portStatus) ? portStatus : "No cooling command active";
+            row.Cells[10].ToolTipText = feedback; row.Cells[11].ToolTipText = feedback;
         }
         if (log.Visible) UpdateReadOnlyText(log, (startupWarning.Length == 0 ? "" : "STARTUP RECOVERY: " + startupWarning + Environment.NewLine + Environment.NewLine) + string.Join(Environment.NewLine, engine.Logs));
         void Preview(PictureBox view, FrameRenderer renderer, DisplaySettings display, int height, ref string? oldKey, ref DisplaySettings? oldSettings)
         {
             if (!view.Visible) return;
-            var now = t with { Time = DateTimeOffset.Now }; string? key = FrameRenderer.VisualKey(now, display, engine.OnlineMedia);
+            var now = t with { RenderTime = DateTimeOffset.Now }; string? key = FrameRenderer.VisualKey(now, display, engine.OnlineMedia);
             if (view.Image is not null && key is not null && key == oldKey && ReferenceEquals(oldSettings, display)) return;
             var next = renderer.Render(now, display, 480, height, engine.OnlineMedia); var old = view.Image; view.Image = next; old?.Dispose(); oldKey = key; oldSettings = display;
         }
@@ -555,6 +623,11 @@ internal sealed class MainForm : Form
     private void ProfileMenu()
     {
         var menu = ReplacePopup(ref profileMenu);
+        menu.Items.Add("Save now", null, (_, _) =>
+        {
+            ApplyPendingSettings();
+        });
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Import profile… (load into this window)", null, (_, _) =>
         {
             try
@@ -918,172 +991,4 @@ internal sealed class MainForm : Form
     }
     protected override void Dispose(bool disposing)
     { if (disposing) { if (!engine.Running) engine.OnlineMedia.Dispose(); startupMenu?.Dispose(); profileMenu?.Dispose(); settingsDelay.Dispose(); refresh.Dispose(); tray.ContextMenuStrip?.Dispose(); tray.Dispose(); panelRenderer.Dispose(); aioRenderer.Dispose(); panelPreview.Image?.Dispose(); aioPreview.Image?.Dispose(); hints.Dispose(); appIcon.Dispose(); } base.Dispose(disposing); }
-}
-
-internal sealed class DisplayEditor : GroupBox
-{
-    private readonly ToolTip hints = new() { AutoPopDelay = 20000, InitialDelay = 450, ShowAlways = true };
-    public event Action? SettingsChanged;
-    private readonly CheckBox enabled = new() { Text = "Enable this LCD", AutoSize = true }, overlay = new() { Text = "Metrics overlay", AutoSize = true };
-    private readonly CheckBox custom = new() { Text = "Use custom widget layout", AutoSize = true };
-    private readonly ComboBox content = new() { DropDownStyle = ComboBoxStyle.DropDownList }, rotation = new() { DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly TextBox path = new();
-    private readonly NumericUpDown brightness = new() { Minimum = 0, Maximum = 100 };
-    private readonly NumericUpDown frames = new() { Minimum = 1, Maximum = 10 };
-    private readonly CheckBox cycle = new() { Text = "Rotate widget pages", AutoSize = true };
-    private readonly NumericUpDown cycleSeconds = new() { Minimum = 1, Maximum = 3600 };
-    private readonly Label connection = new() { Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.Silver, Text = "Offline editor · hardware is opened only in a live session" };
-    private readonly Panel scroll = new() { Dock = DockStyle.Fill, AutoScroll = true };
-    private readonly Button editWidgets = new() { Text = "Edit widgets…", AutoSize = true, FlatStyle = FlatStyle.Flat };
-    private readonly ComboBox layoutPreset = new() { DropDownStyle = ComboBoxStyle.DropDownList, DropDownWidth = 360 };
-    private readonly Button previewPreset = new() { Text = "Preview preset…", AutoSize = true, FlatStyle = FlatStyle.Flat };
-    private bool acceptingLayout;
-    private DisplaySettings design;
-    public DisplayEditor(string title, DisplaySettings s, int width, int height, Func<Telemetry> telemetry)
-    {
-        design = s.Copy();
-        Text = title; Dock = DockStyle.Fill; ForeColor = Color.White; Padding = new Padding(16); Margin = new Padding(5);
-        var grid = new BufferedTableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 14 };
-        grid.ColumnStyles.Add(new(SizeType.Absolute, 115)); grid.ColumnStyles.Add(new(SizeType.Percent, 100));
-        for (int row = 0; row < 14; row++) grid.RowStyles.Add(new(SizeType.Absolute, row == 13 ? 60 : row == 2 ? 46 : 38));
-        Controls.Add(scroll); scroll.Controls.Add(grid);
-        content.Items.AddRange(Enum.GetNames<DisplayContent>()); rotation.Items.AddRange(["0", "90", "180", "270"]);
-        enabled.Checked = s.Enabled; overlay.Checked = s.Overlay; custom.Checked = s.UseCustomLayout; content.SelectedItem = s.Content.ToString(); rotation.SelectedItem = s.Rotation.ToString(); brightness.Value = s.Brightness; frames.Value = s.FramesPerSecond; path.Text = s.MediaPath;
-        grid.Controls.Add(enabled, 0, 0); grid.SetColumnSpan(enabled, 2);
-        layoutPreset.Items.AddRange(LcdPresets.Available(width, height).Cast<object>().ToArray());
-        layoutPreset.SelectedIndex = 0; layoutPreset.Dock = DockStyle.Fill;
-        grid.Controls.Add(new Label { Text = "Layout preset", AutoSize = true, Margin = new Padding(0, 8, 0, 0) }, 0, 1);
-        grid.Controls.Add(layoutPreset, 1, 1);
-        var layoutActions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoScroll = true };
-        layoutActions.Controls.Add(previewPreset); layoutActions.Controls.Add(editWidgets);
-        grid.Controls.Add(layoutActions, 0, 2); grid.SetColumnSpan(layoutActions, 2);
-        var fields = new (string, Control)[] { ("Content", content), ("Media file", path), ("Brightness %", brightness), ("Rotation °", rotation), ("Frames / sec", frames), ("", overlay) };
-        for (int i = 0; i < fields.Length; i++) { grid.Controls.Add(new Label { Text = fields[i].Item1, AutoSize = true, Margin = new Padding(0, 8, 0, 0) }, 0, i + 3); fields[i].Item2.Dock = DockStyle.Fill; grid.Controls.Add(fields[i].Item2, 1, i + 3); }
-        rotation.AccessibleDescription = width == height ? "Clockwise rotation in degrees." : "0 or 180: landscape. 90 or 270: portrait. The preset supplies a layout designed for that orientation.";
-        var browse = new Button { Text = "Choose image / GIF", AutoSize = true, FlatStyle = FlatStyle.Flat };
-        browse.Click += (_, _) => { using var d = new OpenFileDialog { Filter = "Images|*.jpg;*.jpeg;*.png;*.gif;*.bmp" }; if (d.ShowDialog() == DialogResult.OK) { path.Text = d.FileName; content.SelectedItem = "Image"; } };
-        grid.Controls.Add(browse, 1, 9);
-        grid.Controls.Add(custom, 1, 10);
-        cycle.Checked = s.RotateWidgetGroups; cycleSeconds.Value = s.WidgetGroupSeconds;
-        grid.Controls.Add(cycle, 0, 11); grid.SetColumnSpan(cycle, 2);
-        grid.Controls.Add(new Label { Text = "Page seconds", AutoSize = true }, 0, 12); grid.Controls.Add(cycleSeconds, 1, 12);
-        grid.Controls.Add(connection, 0, 13); grid.SetColumnSpan(connection, 2);
-        editWidgets.Click += (_, _) =>
-        {
-            try
-            {
-                using var editor = new WidgetDesignerForm(title, Read(), width, height, telemetry);
-                if (editor.ShowDialog(FindForm()) == DialogResult.OK) AcceptLayout(editor.Result);
-            }
-            catch (Exception error) { MessageBox.Show(error.Message, "Widget designer", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
-        };
-        previewPreset.Click += (_, _) =>
-        {
-            try
-            {
-                if (layoutPreset.SelectedItem is not LcdPreset preset) return;
-                var candidate = LcdPresets.Create(Read(), preset.Id, width, height);
-                using var editor = new WidgetDesignerForm(title + " · " + preset.Name, candidate, width, height, telemetry);
-                // Cancel leaves every current display/cooling setting unchanged.
-                if (editor.ShowDialog(FindForm()) == DialogResult.OK) AcceptLayout(editor.Result);
-            }
-            catch (Exception error) { MessageBox.Show(error.Message, "Layout preset", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
-        };
-        rotation.SelectedIndexChanged += (_, _) =>
-        {
-            if (acceptingLayout) return;
-            var before = WidgetLayout.Canvas(design, width, height);
-            design.Rotation = int.Parse((string)rotation.SelectedItem!, CultureInfo.InvariantCulture);
-            var after = WidgetLayout.Canvas(design, width, height);
-            if (before != after) WidgetLayout.Reframe(design, before.Width, before.Height, after.Width, after.Height);
-        };
-        custom.CheckedChanged += (_, _) =>
-        {
-            if (custom.Checked && design.Widgets.Count == 0)
-            { var size = WidgetLayout.Canvas(design, width, height); design.Widgets = WidgetLayout.Defaults(size.Width, size.Height); }
-        };
-        hints.SetToolTip(enabled, "Enables only this LCD during Live. Editing a disabled LCD is safe and works offline.");
-        hints.SetToolTip(layoutPreset, "Choose an orientation-specific template, then preview it before replacing your current layout.");
-        hints.SetToolTip(previewPreset, "Opens an editable copy. Cancel preserves the current layout; Apply replaces this display's widgets only.");
-        hints.SetToolTip(editWidgets, "Edit text, sensor sources, fonts, colors, gauges and placement. No live hardware is needed for editing.");
-        hints.SetToolTip(content, "Dashboard: sensor widgets. Image: selected image/GIF. Screen: primary desktop, which may contain private information.");
-        hints.SetToolTip(path, "Local image/GIF path, up to 25 MiB. The file remains on this PC; it is not uploaded.");
-        hints.SetToolTip(brightness, "Physical LCD brightness from 0 to 100. Changing it reconnects only this display, not the fan controller.");
-        hints.SetToolTip(rotation, rotation.AccessibleDescription);
-        hints.SetToolTip(frames, "LCD refresh rate. 1–2 FPS is sufficient for temperatures and uses less CPU/USB bandwidth than 10 FPS.");
-        hints.SetToolTip(overlay, "Draw sensor widgets over Image/Screen content. Dashboard always displays its widgets.");
-        hints.SetToolTip(custom, "Use your editable widgets instead of the built-in dashboard layout.");
-        hints.SetToolTip(cycle, "Assign Page 1, 2… in Edit widgets. Pages rotate; Page 0 stays visible. Disabled rotation shows all widgets. No controller reconnect or fan changes.");
-        hints.SetToolTip(cycleSeconds, "Seconds per page (1–3600); 5 is a good start. Independent for each LCD. The editor keeps the selected widget's page visible.");
-        foreach (Control label in grid.Controls.OfType<Label>())
-        {
-            var position = grid.GetPositionFromControl(label);
-            if (position.Column == 0 && grid.GetControlFromPosition(1, position.Row) is { } input)
-                hints.SetToolTip(label, hints.GetToolTip(input));
-        }
-    }
-    private void AcceptLayout(DisplaySettings layout)
-    {
-        acceptingLayout = true;
-        try
-        {
-            design = layout.Copy();
-            // Do not reframe freshly designed portrait widgets a second time.
-            rotation.SelectedItem = design.Rotation.ToString(CultureInfo.InvariantCulture);
-            content.SelectedItem = design.Content.ToString();
-            cycle.Checked = design.RotateWidgetGroups; cycleSeconds.Value = design.WidgetGroupSeconds;
-            custom.Checked = true; overlay.Checked = true;
-        }
-        finally { acceptingLayout = false; }
-        SettingsChanged?.Invoke();
-    }
-    internal int ExercisePresetsForTest(int width, int height)
-    {
-        int checks = 0;
-        foreach (var preset in LcdPresets.Available(width, height))
-        {
-            var before = Read();
-            var candidate = LcdPresets.Create(before, preset.Id, width, height);
-            if (Read().Rotation != before.Rotation || Read().Widgets.Count != before.Widgets.Count)
-                throw new InvalidOperationException("Previewing a preset modified the display.");
-            checks++;
-            AcceptLayout(candidate);
-            var after = Read(); WidgetLayout.Validate(after, width, height);
-            if (after.Rotation != candidate.Rotation || after.Widgets[0].X != candidate.Widgets[0].X ||
-                after.Widgets[0].Width != candidate.Widgets[0].Width || after.Enabled != before.Enabled ||
-                after.Brightness != before.Brightness || after.FramesPerSecond != before.FramesPerSecond)
-                throw new InvalidOperationException("Preset acceptance reframed widgets twice or changed device controls.");
-            checks++;
-        }
-        if (!previewPreset.Enabled || layoutPreset.Items.Count != LcdPresets.Available(width, height).Count)
-            throw new InvalidOperationException("Preset controls must remain available offline.");
-        return checks + 1;
-    }
-    internal void UpdateConnectionStatus(string text) { if (connection.Text != text) connection.Text = text; }
-    internal int ExerciseOfflineEditorForTest()
-    {
-        if (!editWidgets.Enabled || !scroll.AutoScroll || editWidgets.Top > 100) throw new InvalidOperationException("Offline LCD widget editor is hidden or disabled.");
-        UpdateConnectionStatus("Not detected · reconnect the device; its layout remains editable offline");
-        if (!connection.Text.Contains("editable offline")) throw new InvalidOperationException("LCD connection status was not updated.");
-        return 2;
-    }
-    public DisplaySettings Read()
-    {
-        var result = design.Copy(); result.Enabled = enabled.Checked; result.Content = Enum.Parse<DisplayContent>((string)content.SelectedItem!); result.MediaPath = path.Text.Trim(); result.Brightness = (int)brightness.Value; result.FramesPerSecond = (int)frames.Value; result.Rotation = int.Parse((string)rotation.SelectedItem!, CultureInfo.InvariantCulture); result.Overlay = overlay.Checked; result.UseCustomLayout = custom.Checked;
-        result.RotateWidgetGroups = cycle.Checked; result.WidgetGroupSeconds = (int)cycleSeconds.Value; return result;
-    }
-    public void LoadProfile(DisplaySettings value)
-    {
-        acceptingLayout = true;
-        try
-        {
-            design = value.Copy(); enabled.Checked = value.Enabled; overlay.Checked = value.Overlay;
-            content.SelectedItem = value.Content.ToString(); rotation.SelectedItem = value.Rotation.ToString(CultureInfo.InvariantCulture);
-            brightness.Value = value.Brightness; frames.Value = value.FramesPerSecond; path.Text = value.MediaPath; custom.Checked = value.UseCustomLayout;
-            cycle.Checked = value.RotateWidgetGroups; cycleSeconds.Value = value.WidgetGroupSeconds;
-        }
-        finally { acceptingLayout = false; }
-    }
-    protected override void Dispose(bool disposing)
-    { if (disposing) hints.Dispose(); base.Dispose(disposing); }
 }

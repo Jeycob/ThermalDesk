@@ -181,13 +181,13 @@ internal sealed class Engine
                         Telemetry reading;
                         if (testTelemetry is not null) reading = testTelemetry();
                         else { monitor ??= new(); reading = monitor.Read(Volatile.Read(ref current).PreferredGpuId); }
-                        Volatile.Write(ref latest, history.Add(reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray() }, Volatile.Read(ref current)));
+                        Volatile.Write(ref latest, history.Add(reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray(), ExpectedSampleSeconds = seconds }, Volatile.Read(ref current)));
                     }
                     else
                     {
                         double x = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 20d;
                         var preview = new Telemetry(DateTimeOffset.UtcNow, 48 + Math.Sin(x) * 5, 42 + Math.Cos(x) * 4, 12, 8, 31, "Simulated preview")
-                        { CpuPowerWatts = 50 + Math.Sin(x) * 10, GpuPowerWatts = 35 + Math.Cos(x) * 12 };
+                        { CpuPowerWatts = 50 + Math.Sin(x) * 10, GpuPowerWatts = 35 + Math.Cos(x) * 12, ExpectedSampleSeconds = seconds };
                         Volatile.Write(ref latest, history.Add(preview, Volatile.Read(ref current)));
                     }
                     SetStatus("Sensors", (Latest.Warning.Length == 0 ? "CPU / GPU / RAM · shared sampler" : Latest.Warning) + $" · {seconds} s interval");
@@ -325,7 +325,7 @@ internal sealed class Engine
                             reconfigured = true;
                             break;
                         }
-                        var telemetry = Latest with { Time = DateTimeOffset.Now };
+                        var telemetry = Latest with { RenderTime = DateTimeOffset.Now };
                         string? key = FrameRenderer.VisualKey(telemetry, display, OnlineMedia);
                         if (encoded is null || key is null || key != previousKey || !ReferenceEquals(previousDisplay, display))
                         {
@@ -395,28 +395,89 @@ internal sealed class Engine
                         await Task.Delay(50, token);
                     }
                     Guard(token); controllerAttempted = true; controller = openController(s.ControllerSerial);
-                    var lastDuty = new Dictionary<int, int>();
+                    var clock = Stopwatch.StartNew();
+                    var confirmations = new Dictionary<int, DutyConfirmation>();
+                    void ProtectStartedPorts()
+                    {
+                        Guard(token);
+                        if (!FanSafety.IsCritical(Latest, DateTimeOffset.UtcNow)) return;
+                        foreach (var (port, confirmation) in confirmations)
+                        {
+                            if (confirmation.RequestedDuty == 100) continue;
+                            Guard(token);
+                            var activePort = Volatile.Read(ref current).Ports.Single(p => p.Port == port);
+                            var decision = policies[port].Evaluate(activePort, Latest, DateTimeOffset.UtcNow, 0);
+                            if (decision.Duty is null) throw new IOException(decision.Reason);
+                            controller.SetDuty(port, decision.Duty.Value);
+                            confirmation.Command(decision.Duty.Value, clock.Elapsed.TotalSeconds);
+                            FanCommands[port] = new(port, decision.Duty.Value, decision.TargetDuty ?? decision.Duty.Value, decision.Reason + " · " + confirmation.Description, DateTimeOffset.UtcNow);
+                        }
+                    }
                     foreach (var p in monitored)
                     {
-                        var initial = initialDecisions[p.Port];
-                        controller.SetDuty(p.Port, initial.Duty!.Value); lastDuty[p.Port] = initial.Duty.Value;
-                        FanCommands[p.Port] = new(p.Port, initial.Duty.Value, initial.TargetDuty ?? initial.Duty.Value, initial.Reason, DateTimeOffset.UtcNow);
+                        ProtectStartedPorts(); controller.CaptureBaseline(p.Port); ProtectStartedPorts();
+                        // Opening USB and capturing a baseline may block. Neither
+                        // the readiness sample nor the old profile authorizes a
+                        // later speed write after cancellation or a thermal change.
+                        var activePort = Volatile.Read(ref current).Ports.Single(x => x.Port == p.Port);
+                        policies[p.Port].Reset();
+                        var initial = policies[p.Port].Evaluate(activePort, Latest, DateTimeOffset.UtcNow, 0);
+                        if (initial.Duty is null) throw new IOException(initial.Reason);
+                        controller.SetDuty(p.Port, initial.Duty.Value);
+                        confirmations[p.Port] = new(initial.Duty.Value, clock.Elapsed.TotalSeconds);
+                        FanCommands[p.Port] = new(p.Port, initial.Duty.Value, initial.TargetDuty ?? initial.Duty.Value, initial.Reason + " · " + confirmations[p.Port].Description, DateTimeOffset.UtcNow);
                     }
                     SetStatus("Controller", "Connected · 264A:232B");
                     var failures = monitored.ToDictionary(p => p.Port, _ => 0);
-                    var clock = Stopwatch.StartNew(); double nextControl = 0, nextLight = 0, previousControl = 0;
+                    double nextControl = 0, nextFeedback = 0, nextLight = 0, previousControl = clock.Elapsed.TotalSeconds;
                     var lastLighting = new Dictionary<int, LedColor[]>(); double lastKeepalive = -2;
                     Settings? scheduleProfile = null; DateTime scheduleMinute = DateTime.MinValue;
                     var schedule = ScheduledLighting.Unchanged;
-                    while (!token.IsCancellationRequested)
+                    void ControlIfDue()
                     {
                         Guard(token);
                         s = Volatile.Read(ref current);
                         monitored = s.Ports.Where(p => s.CoolingEnabled && p.Mode != ControlMode.Preserve).ToArray();
+                        // A read may cross the safety age limit before the next
+                        // scheduled curve evaluation. Never retry an unconfirmed
+                        // command from expired data in that intervening window.
+                        if (monitored.Length > 0 && !FanSafety.IsFresh(Latest, DateTimeOffset.UtcNow))
+                            throw new IOException("Stale telemetry · release software control; do not force full speed");
+                        double controlTime = clock.Elapsed.TotalSeconds;
+                        bool due = controlTime >= nextControl;
+                        // A critical sample takes priority between every bounded
+                        // HID transaction, including inside a slow feedback sweep.
+                        if (!due && !FanSafety.IsCritical(Latest, DateTimeOffset.UtcNow)) return;
+                        double controlSeconds = due ? controlTime - previousControl : 0;
+                        if (due)
+                        {
+                            previousControl = controlTime;
+                            nextControl = controlTime + Math.Min(s.PollSeconds, 2);
+                        }
+                        foreach (var p in monitored)
+                        {
+                            Guard(token);
+                            var decision = policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, controlSeconds);
+                            if (decision.Duty is null) throw new IOException(decision.Reason);
+                            var confirmation = confirmations[p.Port];
+                            if (confirmation.RequestedDuty != decision.Duty.Value)
+                            {
+                                controller.SetDuty(p.Port, decision.Duty.Value);
+                                confirmation.Command(decision.Duty.Value, clock.Elapsed.TotalSeconds);
+                            }
+                            string reason = decision.Reason + " · " + confirmation.Description;
+                            FanCommands[p.Port] = new(p.Port, decision.Duty.Value, decision.TargetDuty ?? decision.Duty.Value, reason, DateTimeOffset.UtcNow);
+                            SetStatus($"Port {p.Port}", $"{decision.Duty}% · {reason}");
+                        }
+                    }
+                    while (!token.IsCancellationRequested)
+                    {
+                        ControlIfDue();
                         // Turning lighting off is explicit user intent. Send black once;
                         // do not close/reinitialize the shared cooling controller.
                         foreach (var disabled in lastLighting.Keys.Where(port => !s.RgbEnabled || !s.Ports.Any(p => p.Port == port && Lighting.IsManaged(p))).ToArray())
                         {
+                            ControlIfDue();
                             controller.SetRgbFrame(disabled, new LedColor[lastLighting[disabled].Length]);
                             lastLighting.Remove(disabled);
                             SetStatus($"RGB port {disabled}", "Released · last output cleared; no continuing lighting writes");
@@ -426,31 +487,31 @@ internal sealed class Engine
                         // managed lighting frame loop below.
                         foreach (var stalePort in Fans.Keys.Where(port => !s.Ports.Any(p => p.Port == port && (s.MonitorFanController || monitored.Any(m => m.Port == port) || s.RgbEnabled && p.Rgb))).ToArray())
                             Fans.TryRemove(stalePort, out _);
-                        // Apply thermal decisions before any slower RPM queries or lighting transfers.
-                        if (clock.Elapsed.TotalSeconds >= nextControl)
+                        if (clock.Elapsed.TotalSeconds >= nextFeedback)
                         {
-                            double controlTime = clock.Elapsed.TotalSeconds;
-                            double controlSeconds = controlTime - previousControl;
-                            previousControl = controlTime;
-                            foreach (var p in monitored)
+                            // Both deadlines are start-to-start. Feedback and RGB
+                            // never add their total transfer time to control delay.
+                            nextFeedback = clock.Elapsed.TotalSeconds + Math.Min(s.PollSeconds, 2);
+                            foreach (var p in s.Ports.Where(p => s.MonitorFanController || monitored.Any(m => m.Port == p.Port) || s.RgbEnabled && p.Rgb).ToArray())
                             {
-                                var decision = policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, controlSeconds);
-                                if (decision.Duty is null) throw new IOException(decision.Reason);
-                                if (lastDuty[p.Port] != decision.Duty!.Value)
-                                { controller.SetDuty(p.Port, decision.Duty.Value); lastDuty[p.Port] = decision.Duty.Value; }
-                                FanCommands[p.Port] = new(p.Port, decision.Duty.Value, decision.TargetDuty ?? decision.Duty.Value, decision.Reason, DateTimeOffset.UtcNow);
-                                SetStatus($"Port {p.Port}", $"{decision.Duty}% · {decision.Reason}");
-                            }
-                            foreach (var p in s.Ports.Where(p => s.MonitorFanController || monitored.Any(m => m.Port == p.Port) || s.RgbEnabled && p.Rgb))
-                            {
+                                ControlIfDue();
+                                int? requestedAtRead = confirmations.TryGetValue(p.Port, out var confirmation) ? confirmation.RequestedDuty : null;
                                 var reading = controller.Read(p.Port); Fans[p.Port] = reading;
+                                ControlIfDue();
                                 if (failures.ContainsKey(p.Port))
                                 {
                                     failures[p.Port] = reading.Rpm == 0 ? failures[p.Port] + 1 : 0;
                                     if (failures[p.Port] >= 3) throw new IOException($"Port {p.Port}: repeated zero RPM. Check wiring; releasing captured duty, not forcing full speed.");
+                                    // Compare against the request that existed during
+                                    // the read, even if an urgent command just changed it.
+                                    if (confirmation!.Observe(p.Port, reading.Duty, requestedAtRead!.Value, clock.Elapsed.TotalSeconds))
+                                    {
+                                        Guard(token); controller.SetDuty(p.Port, confirmation.RequestedDuty);
+                                        Note($"Port {p.Port}: duty readback {reading.Duty}% differs from requested {confirmation.RequestedDuty}%; retry {confirmation.Retries}/{DutyConfirmation.MaximumRetries} after {DutyConfirmation.GraceSeconds:0.0} s confirmation grace.");
+                                    }
+                                    SetStatus($"Port {p.Port}", $"{confirmation.RequestedDuty}% · {confirmation.Description}");
                                 }
                             }
-                            nextControl = clock.Elapsed.TotalSeconds + Math.Min(s.PollSeconds, 2);
                         }
                         if (s.RgbEnabled && clock.Elapsed.TotalSeconds >= nextLight)
                         {
@@ -460,6 +521,7 @@ internal sealed class Engine
                             { schedule = RgbSchedule.At(s, local); scheduleProfile = s; scheduleMinute = minute; }
                             foreach (var p in s.Ports.Where(Lighting.IsManaged))
                             {
+                                ControlIfDue();
                                 var colors = Lighting.OutputFrame(p, s.RgbColor, elapsed, Latest, schedule);
                                 if (keepalive || !lastLighting.TryGetValue(p.Port, out var previous) || !previous.SequenceEqual(colors))
                                 { controller.SetRgbFrame(p.Port, colors); lastLighting[p.Port] = colors; }
@@ -467,8 +529,8 @@ internal sealed class Engine
                             }
                             if (keepalive) lastKeepalive = elapsed; nextLight = elapsed + .2;
                         }
-                        // One bounded worker, at most 5 lighting frames/s; control/sensor cadence is independent.
-                        await Task.Delay(s.RgbEnabled && s.Ports.Any(p => p.Rgb && p.RgbEffect != RgbEffect.Static) ? 200 : 1000, token);
+                        ControlIfDue();
+                        await Task.Delay(TimeSpan.FromMilliseconds(Math.Clamp((nextControl - clock.Elapsed.TotalSeconds) * 1000, 20, 200)), token);
                     }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
@@ -509,6 +571,40 @@ internal sealed class Engine
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
+    // One instance per port, owned solely by FanLoop. Changing a moving curve
+    // target must not restart the grace window for an unconfirmed controller.
+    internal sealed class DutyConfirmation(int requestedDuty, double now)
+    {
+        internal const double GraceSeconds = 1.5;
+        internal const int MaximumRetries = 2;
+        private const int Tolerance = 2;
+        private double? pendingSince = now;
+        private double lastWrite = now, lastRetry;
+        internal int RequestedDuty { get; private set; } = requestedDuty;
+        internal int? ConfirmedDuty { get; private set; }
+        internal int Retries { get; private set; }
+        internal string Description => pendingSince.HasValue
+            ? $"awaiting duty confirmation · {GraceSeconds:0.0} s grace · retry {Retries}/{MaximumRetries}"
+            : $"confirmed duty {ConfirmedDuty}%";
+        internal void Command(int duty, double time)
+        {
+            RequestedDuty = duty; lastWrite = time; pendingSince ??= time;
+        }
+        internal bool Observe(int port, int actual, int requestedAtRead, double time)
+        {
+            if (Math.Abs(actual - requestedAtRead) <= Tolerance)
+            {
+                ConfirmedDuty = actual; Retries = 0;
+                pendingSince = Math.Abs(actual - RequestedDuty) <= Tolerance ? null : lastWrite;
+                return false;
+            }
+            pendingSince ??= time;
+            if (time - pendingSince.Value < GraceSeconds || Retries > 0 && time - lastRetry < GraceSeconds) return false;
+            if (Retries >= MaximumRetries)
+                throw new IOException($"Port {port}: duty not confirmed after {MaximumRetries} retries ({GraceSeconds:0.0} s grace); requested {RequestedDuty}%, read {actual}%, last confirmed {ConfirmedDuty?.ToString() ?? "unavailable"}%. Check the controller; releasing captured duty.");
+            Retries++; lastRetry = time; return true;
+        }
     }
     private void SetStatus(string key, string value)
     {

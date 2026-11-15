@@ -14,6 +14,11 @@ public sealed record CurvePoint(double Temperature, double Duty);
 public sealed record Telemetry(DateTimeOffset Time, double? CpuTemperature, double? GpuTemperature,
     double? CpuLoad, double? GpuLoad, double? MemoryUsedPercent, string Warning = "")
 {
+    // Time always identifies the sensor sample. Rendering may advance clocks and
+    // page rotation without making an old sample appear fresh.
+    [JsonIgnore] public DateTimeOffset? RenderTime { get; init; }
+    [JsonIgnore] public DateTimeOffset PresentationTime => RenderTime ?? Time;
+    [JsonIgnore] public int ExpectedSampleSeconds { get; init; } = 2;
     public double? GpuHotSpotTemperature { get; init; }
     public double? GpuMemoryTemperature { get; init; }
     public double? CpuMaximumTemperature { get; init; }

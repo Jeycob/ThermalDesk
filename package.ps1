@@ -4,6 +4,11 @@ Add-Type -AssemblyName System.IO.Compression
 $root = $PSScriptRoot
 $binary = Join-Path $root 'dist/ThermalDesk-win-x64'
 if (-not (Test-Path -LiteralPath (Join-Path $binary 'ThermalDesk.exe'))) { throw 'Build the portable application first.' }
+[xml]$project = Get-Content -LiteralPath (Join-Path $root 'src/ThermalDesk.App/ThermalDesk.App.csproj') -Raw
+$version = [string]$project.Project.PropertyGroup.Version
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid package version.' }
+$publishedVersion = (Get-Item -LiteralPath (Join-Path $binary 'ThermalDesk.exe')).VersionInfo.ProductVersion.Split('+')[0]
+if ($publishedVersion -ne $version) { throw "Publish version $version before packaging (binary is $publishedVersion)." }
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE'),(Join-Path $root 'README.md'),(Join-Path $root 'THIRD-PARTY-NOTICES.txt'),(Join-Path $root 'VALIDATION.txt') -Destination $binary -Force
 Copy-Item -LiteralPath (Join-Path $root 'licenses') -Destination $binary -Recurse -Force
 $artifacts = Join-Path $root 'artifacts'
@@ -24,11 +29,9 @@ function Write-Zip([string]$Destination, [string]$Base, [IO.FileInfo[]]$Files) {
         } finally { $zip.Dispose() }
     } finally { $stream.Dispose() }
 }
-[xml]$project = Get-Content -LiteralPath (Join-Path $root 'src/ThermalDesk.App/ThermalDesk.App.csproj') -Raw
-$version = [string]$project.Project.PropertyGroup.Version
-if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid package version.' }
 Write-Zip (Join-Path $artifacts "ThermalDesk-$version-preview-win-x64.zip") $binary @(Get-ChildItem -LiteralPath $binary -File -Recurse)
-$files = @('.gitignore','Directory.Build.props','NuGet.Config','build.ps1','package.ps1','README.md','LICENSE','THIRD-PARTY-NOTICES.txt','VALIDATION.txt') | ForEach-Object { Get-Item -LiteralPath (Join-Path $root $_) }
+$files = @('.gitignore','global.json','Directory.Build.props','NuGet.Config','build.ps1','package.ps1','README.md','LICENSE','THIRD-PARTY-NOTICES.txt','VALIDATION.txt') | ForEach-Object { Get-Item -LiteralPath (Join-Path $root $_) }
+$files += Get-ChildItem -LiteralPath (Join-Path $root '.github') -File -Recurse
 $files += Get-ChildItem -LiteralPath (Join-Path $root 'src'),(Join-Path $root 'tests'),(Join-Path $root 'licenses'),(Join-Path $root 'installer') -File -Recurse | Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' }
 Write-Zip (Join-Path $artifacts "ThermalDesk-$version-source.zip") $root $files
 $hashes = @(Get-FileHash -LiteralPath (Join-Path $artifacts "ThermalDesk-$version-preview-win-x64.zip"),(Join-Path $artifacts "ThermalDesk-$version-source.zip") -Algorithm SHA256 | Select-Object @{n='File';e={[IO.Path]::GetFileName($_.Path)}},Hash)

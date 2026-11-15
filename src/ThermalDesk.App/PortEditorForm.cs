@@ -23,6 +23,7 @@ internal sealed class PortEditorForm : Form
     private readonly DataGridView points = new();
     private readonly Label status = new() { AutoSize = true };
     private readonly CurveCanvas chart;
+    private readonly System.Windows.Forms.Timer previewRefresh = new() { Interval = 1000 };
     public PortSettings Result { get; private set; }
     public PortEditorForm(PortSettings settings, Func<Telemetry>? telemetry = null, string fallbackColor = "23D6BA", bool rgbMasterEnabled = true)
     {
@@ -46,7 +47,7 @@ internal sealed class PortEditorForm : Form
         tips.SetToolTip(rgb, "ON sends the selected effect; unchecking explicitly requests OFF. Both require Live mode and the main RGB switch. It never switches the fan motor off.");
         lightingTab.Controls.Add(Fields([("Port lighting", rgb, 32), ("", rgbActions, 38), ("LED count", leds, 32), ("RGB effect", effect, 32), ("Brightness %", brightness, 32), ("Effect period (s)", period, 32), ("Port color", color, 158), ("Wave direction", direction, 32), ("Wave palette", palette, 196), ("", lightingHint, 90)]));
         role.SelectedItem = settings.Role.ToString(); mode.SelectedItem = settings.Mode.ToString(); source.SelectedItem = settings.Source.ToString(); effect.SelectedItem = settings.RgbEffect.ToString(); minimum.Value = settings.MinimumDuty; fixedDuty.Value = settings.FixedDuty; leds.Value = settings.LedCount; brightness.Value = settings.RgbBrightness; period.Value = (decimal)settings.RgbPeriodSeconds; rgb.Checked = settings.Rgb;
-        role.SelectedIndexChanged += (_, _) => { bool pump = (string)role.SelectedItem! == nameof(PortRole.Pump); minimum.Minimum = fixedDuty.Minimum = pump ? 60 : 30; if (minimum.Value < minimum.Minimum) minimum.Value = minimum.Minimum; if (fixedDuty.Value < fixedDuty.Minimum) fixedDuty.Value = fixedDuty.Minimum; RefreshFanFields(); };
+        role.SelectedIndexChanged += (_, _) => RefreshRoleLimits();
         portName.Text = settings.Name;
         direction.SelectedItem = settings.RgbDirection.ToString();
         effect.SelectedIndexChanged += (_, _) => { if ((string?)effect.SelectedItem == nameof(RgbEffect.PaletteWave) && palette.Value.Count == 0) palette.SetColors([fallbackColor, "AA00FF"]); RefreshLightingFields(); RefreshFanFields(); };
@@ -57,12 +58,13 @@ internal sealed class PortEditorForm : Form
         points.Dock = DockStyle.Fill; points.AllowUserToAddRows = false; points.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; points.RowHeadersVisible = false; points.BackgroundColor = BackColor;
         points.DefaultCellStyle.BackColor = Color.FromArgb(22, 34, 48); points.DefaultCellStyle.ForeColor = Color.White; points.DefaultCellStyle.SelectionBackColor = Color.FromArgb(35, 80, 94); points.DefaultCellStyle.SelectionForeColor = Color.White; points.EnableHeadersVisualStyles = false; points.ColumnHeadersDefaultCellStyle.BackColor = BackColor; points.ColumnHeadersDefaultCellStyle.ForeColor = Color.Silver;
         points.Columns.Add("Temperature", "Temperature °C"); points.Columns.Add("Duty", "Duty %"); foreach (var p in settings.Curve) points.Rows.Add(p.Temperature, p.Duty);
-        chart = new CurveCanvas(ReadPoints, SetPoint);
+        chart = new CurveCanvas(ReadFanPreview, SetPoint, telemetry);
         graphPanel.Controls.Add(new RgbPreview(Read, telemetry ?? (() => new Telemetry(DateTimeOffset.UtcNow, null, null, null, null, null)), fallbackColor) { Dock = DockStyle.Fill }, 0, 0);
         graphPanel.Controls.Add(chart, 0, 1); graphPanel.Controls.Add(points, 0, 2); root.Controls.Add(graphPanel, 1, 1);
         points.CellValueChanged += (_, _) => chart.Invalidate(); points.RowsRemoved += (_, _) => chart.Invalidate(); points.DataError += (_, e) => { e.ThrowException = false; status.Text = "Enter numeric curve values."; };
-        mode.SelectedIndexChanged += (_, _) => RefreshFanFields(); minimum.ValueChanged += (_, _) => RefreshFanFields(); fixedDuty.ValueChanged += (_, _) => RefreshFanFields(); RefreshFanFields();
-        tips.SetToolTip(chart, "Drag a turquoise point to set temperature and requested duty. A higher minimum duty overrides lower curve points. No fan writes occur until Apply changes.");
+        mode.SelectedIndexChanged += (_, _) => RefreshFanFields(); source.SelectedIndexChanged += (_, _) => chart.Invalidate(); minimum.ValueChanged += (_, _) => RefreshFanFields(); fixedDuty.ValueChanged += (_, _) => RefreshFanFields(); RefreshRoleLimits();
+        previewRefresh.Tick += (_, _) => chart.Invalidate(); Shown += (_, _) => previewRefresh.Start();
+        tips.SetToolTip(chart, "Drag a grey curve point or edit its table value. Dashed grey is your curve; turquoise includes the minimum duty (or the fixed setting). The preview target uses the current sample and safety checks before acoustic filtering, not the last command or reported RPM. No fan writes occur until Apply changes.");
         tips.SetToolTip(points, "Click a cell to enter exact values. Temperatures must increase left to right; duty may rise or fall. Two to twenty points are supported.");
         var help = new FlowLayoutPanel { Dock = DockStyle.Fill };
         foreach (var preset in Enum.GetValues<FanPreset>())
@@ -88,6 +90,19 @@ internal sealed class PortEditorForm : Form
         p.RgbPeriodSeconds = (double)period.Value; p.RgbColor = color.Value;
         p.RgbDirection = Enum.Parse<RgbDirection>((string)direction.SelectedItem!);
         p.RgbPalette = palette.Value; return p;
+    }
+    private PortSettings ReadFanPreview() => new()
+    {
+        Port = initial.Port, Role = Enum.Parse<PortRole>((string)role.SelectedItem!),
+        Mode = Enum.Parse<ControlMode>((string)mode.SelectedItem!), Source = Enum.Parse<TemperatureSource>((string)source.SelectedItem!),
+        MinimumDuty = (int)minimum.Value, FixedDuty = (int)fixedDuty.Value, Curve = ReadPoints()
+    };
+    private void RefreshRoleLimits()
+    {
+        int floor = (string?)role.SelectedItem == nameof(PortRole.Pump) ? 60 : 30;
+        minimum.Minimum = fixedDuty.Minimum = floor;
+        minimum.Value = Math.Max(minimum.Value, floor); fixedDuty.Value = Math.Max(fixedDuty.Value, floor);
+        RefreshFanFields();
     }
     private TableLayoutPanel Fields((string Name, Control Control, int Height)[] fields)
     {
@@ -126,6 +141,7 @@ internal sealed class PortEditorForm : Form
         bool curve = selected == nameof(ControlMode.Curve), fixedMode = selected == nameof(ControlMode.Fixed);
         source.Enabled = curve || rgb.Checked && (string?)effect.SelectedItem == nameof(RgbEffect.Temperature); minimum.Enabled = curve; fixedDuty.Enabled = fixedMode;
         points.Enabled = curve;
+        chart?.Invalidate();
         fanHint.Text = selected == nameof(ControlMode.Preserve) ? "Leave fan speed untouched. The BIOS/vendor setting remains responsible. RGB can still be controlled separately."
             : fixedMode ? $"Constant requested speed: {fixedDuty.Value}%. Temperature safety remains active. Choose Silent for automatic, quieter cooling."
             : $"Temperature-controlled curve. Minimum {minimum.Value}% overrides lower points. Fan rises wait 4 seconds, then increase gradually (3 percentage points/second). Critical CPU/GPU heat at 85 °C responds immediately; pump increases stay immediate.";
@@ -206,33 +222,77 @@ internal sealed class PortEditorForm : Form
         return count;
     }
     private List<CurvePoint> ReadPoints() => points.Rows.Cast<DataGridViewRow>().Where(r => !r.IsNewRow).Select(r => new CurvePoint(Convert.ToDouble(r.Cells[0].Value, CultureInfo.CurrentCulture), Convert.ToDouble(r.Cells[1].Value, CultureInfo.CurrentCulture))).ToList();
-    protected override void Dispose(bool disposing) { if (disposing) tips.Dispose(); base.Dispose(disposing); }
+    internal (decimal Minimum, decimal FixedMinimum, PortSettings Settings) ReadLimitsForTest() => (minimum.Minimum, fixedDuty.Minimum, ReadFanPreview());
+    protected override void Dispose(bool disposing) { if (disposing) { previewRefresh.Dispose(); tips.Dispose(); } base.Dispose(disposing); }
     private void SetPoint(int index, CurvePoint value) { points.Rows[index].Cells[0].Value = Math.Round(value.Temperature, 1); points.Rows[index].Cells[1].Value = Math.Round(value.Duty); chart.Invalidate(); }
     private static ComboBox Choice<T>() where T : struct, Enum { var c = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList }; c.Items.AddRange(Enum.GetNames<T>()); return c; }
     private static NumericUpDown Number(int min, int max, int decimals = 0) => new() { Minimum = min, Maximum = max, DecimalPlaces = decimals, Increment = decimals > 0 ? .5m : 1 };
     private Button Button(string text, Action action) { var b = new Button { Text = text, AutoSize = true, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(30, 48, 64), ForeColor = Color.White }; b.Click += (_, _) => { try { action(); } catch (Exception e) { status.Text = e.Message; status.ForeColor = Color.Orange; } }; return b; }
 }
 
-internal sealed class CurveCanvas(Func<List<CurvePoint>> read, Action<int, CurvePoint> update) : Control
+internal sealed class CurveCanvas(Func<PortSettings> read, Action<int, CurvePoint> update, Func<Telemetry>? telemetry = null) : Control
 {
     private int selected = -1;
-    private RectangleF Plot => new(48, 22, Math.Max(1, ClientSize.Width - 68), Math.Max(1, ClientSize.Height - 70));
+    private RectangleF Plot => new(48, 48, Math.Max(1, ClientSize.Width - 68), Math.Max(1, ClientSize.Height - 110));
     private PointF View(CurvePoint p) { var a = Plot; return new(a.Left + (float)p.Temperature / 100 * a.Width, a.Bottom - (float)(p.Duty - 30) / 70 * a.Height); }
+    internal static List<CurvePoint> EffectiveCurve(PortSettings p)
+    {
+        int floor = Math.Max(p.Role == PortRole.Pump ? 60 : 30, p.MinimumDuty);
+        if (p.Mode == ControlMode.Fixed) return [new(0, Math.Max(floor, p.FixedDuty)), new(100, Math.Max(floor, p.FixedDuty))];
+        if (p.Mode == ControlMode.Preserve || p.Curve.Count < 2) return [];
+        var points = p.Curve.ToList();
+        // Include crossings so the minimum is a flat clamp, not an early ramp.
+        foreach (var (a, b) in p.Curve.Zip(p.Curve.Skip(1)))
+            if ((a.Duty < floor && b.Duty > floor) || (a.Duty > floor && b.Duty < floor))
+                points.Add(new(a.Temperature + (floor - a.Duty) / (b.Duty - a.Duty) * (b.Temperature - a.Temperature), floor));
+        points.Add(new(0, p.Curve[0].Duty)); points.Add(new(100, p.Curve[^1].Duty));
+        return points.OrderBy(p => p.Temperature).Select(p => new CurvePoint(p.Temperature, Math.Max(floor, p.Duty))).ToList();
+    }
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e); e.Graphics.Clear(Color.FromArgb(10, 17, 29)); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; var a = Plot;
-        using var grid = new Pen(Color.FromArgb(45, 65, 82)); using var pen = new Pen(Color.Turquoise, 2); using var font = new Font("Segoe UI", 9);
+        using var grid = new Pen(Color.FromArgb(45, 65, 82)); using var pen = new Pen(Color.Turquoise, 2); using var rawPen = new Pen(Color.Silver, 1.5f) { DashStyle = DashStyle.Dash }; using var font = new Font("Segoe UI", 9);
         for (int x = 0; x <= 100; x += 20) { float px = View(new(x, 30)).X; e.Graphics.DrawLine(grid, px, a.Top, px, a.Bottom); e.Graphics.DrawString(x.ToString(), font, Brushes.Silver, px - 8, a.Bottom + 3); }
         for (int y = 30; y <= 100; y += 10) { float py = View(new(0, y)).Y; e.Graphics.DrawLine(grid, a.Left, py, a.Right, py); e.Graphics.DrawString(y.ToString(), font, Brushes.Silver, 15, py - 7); }
-        e.Graphics.DrawString("Duty %", font, Brushes.Silver, 5, 2); e.Graphics.DrawString("Temperature °C", font, Brushes.Silver, a.Left + a.Width / 2 - 45, a.Bottom + 23);
-        try { var p = read().Where(p => double.IsFinite(p.Temperature) && double.IsFinite(p.Duty)).Select(View).ToArray(); if (p.Length > 1) e.Graphics.DrawLines(pen, p); foreach (var dot in p) e.Graphics.FillEllipse(Brushes.Turquoise, dot.X - 5, dot.Y - 5, 10, 10); } catch (Exception) { }
+        e.Graphics.DrawString("Duty %", font, Brushes.Silver, 5, 27); e.Graphics.DrawString("Temperature °C", font, Brushes.Silver, a.Left + a.Width / 2 - 45, a.Bottom + 23);
+        e.Graphics.DrawString("Dashed: curve   Solid: minimum / fixed", font, Brushes.Silver, 8, 3);
+        try
+        {
+            var settings = read();
+            var p = settings.Curve.Where(p => double.IsFinite(p.Temperature) && double.IsFinite(p.Duty)).Select(View).ToArray();
+            if (p.Length > 1) e.Graphics.DrawLines(rawPen, p);
+            foreach (var dot in p) e.Graphics.FillEllipse(Brushes.Silver, dot.X - 4, dot.Y - 4, 8, 8);
+            var effective = EffectiveCurve(settings).Select(View).ToArray();
+            if (effective.Length > 1) e.Graphics.DrawLines(pen, effective);
+            string target = settings.Mode == ControlMode.Preserve ? "No speed commands · Preserve" : "Preview target: sensor sample unavailable";
+            if (telemetry is not null && settings.Role != PortRole.Unknown && settings.Mode != ControlMode.Preserve)
+            {
+                var t = telemetry(); var decision = new FanSafety().Evaluate(settings, t, DateTimeOffset.UtcNow, 0);
+                double? temperature = settings.Source switch { TemperatureSource.Cpu => t.CpuTemperature, TemperatureSource.Gpu => t.GpuTemperature, _ => t.CpuTemperature.HasValue && t.GpuTemperature.HasValue ? Math.Max(t.CpuTemperature.Value, t.GpuTemperature.Value) : null };
+                target = decision.Duty is { } duty ? $"Preview target: {duty}% · before ramp" : "Preview: " + decision.Reason;
+                if (decision.Duty.HasValue && temperature is >= 5 and <= 115)
+                {
+                    var point = View(new(Math.Min(100, temperature.Value), decision.Duty.Value));
+                    e.Graphics.FillEllipse(Brushes.Turquoise, point.X - 5, point.Y - 5, 10, 10);
+                    target += $" · {temperature:0.0} °C";
+                }
+            }
+            TextRenderer.DrawText(e.Graphics, target, font, new Rectangle(8, Height - 22, Math.Max(1, Width - 16), 20), Color.Silver, TextFormatFlags.EndEllipsis);
+        }
+        catch (Exception) { /* Incomplete table edits do not invalidate the last saved profile. */ }
     }
     protected override void OnCreateControl() { base.OnCreateControl(); Dock = DockStyle.Fill; DoubleBuffered = true; }
-    protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if(e.Button != MouseButtons.Left)return; try { var p = read(); selected = Enumerable.Range(0, p.Count).FirstOrDefault(i => Math.Abs(View(p[i]).X - e.X) < 12 && Math.Abs(View(p[i]).Y - e.Y) < 12, -1); Capture = selected >= 0; } catch (Exception) { selected = -1; } }
+    protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if(e.Button != MouseButtons.Left)return; try { var settings = read(); if (settings.Mode != ControlMode.Curve) return; var p = settings.Curve; selected = Enumerable.Range(0, p.Count).FirstOrDefault(i => Math.Abs(View(p[i]).X - e.X) < 12 && Math.Abs(View(p[i]).Y - e.Y) < 12, -1); Capture = selected >= 0; } catch (Exception) { selected = -1; } }
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        base.OnMouseMove(e); if (selected < 0) return; var a = Plot;
-        try { var p = read(); if (selected >= p.Count) return; double lo = selected == 0 ? 0 : p[selected - 1].Temperature + .1, hi = selected == p.Count - 1 ? 100 : p[selected + 1].Temperature - .1; if (lo > hi) return; update(selected, new(Math.Clamp((e.X - a.Left) / a.Width * 100, lo, hi), Math.Clamp(30 + (a.Bottom - e.Y) / a.Height * 70, 30, 100))); } catch (Exception) { }
+        base.OnMouseMove(e); if (selected < 0) return;
+        if (e.Button != MouseButtons.Left || !Capture) { selected = -1; Capture = false; return; }
+        var a = Plot;
+        try { var settings = read(); if (settings.Mode != ControlMode.Curve) { selected = -1; Capture = false; return; } var p = settings.Curve; if (selected >= p.Count) return; double lo = selected == 0 ? 0 : p[selected - 1].Temperature + .1, hi = selected == p.Count - 1 ? 100 : p[selected + 1].Temperature - .1; if (lo > hi) return; update(selected, new(Math.Clamp((e.X - a.Left) / a.Width * 100, lo, hi), Math.Clamp(30 + (a.Bottom - e.Y) / a.Height * 70, 30, 100))); } catch (Exception) { }
     }
     protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); selected = -1; Capture = false; }
+    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) selected = -1; }
+    internal Point PointForTest(int index) => Point.Round(View(read().Curve[index]));
+    internal void MouseDownForTest(Point point) => OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, point.X, point.Y, 0));
+    internal void MouseMoveForTest(Point point, MouseButtons buttons) => OnMouseMove(new MouseEventArgs(buttons, 0, point.X, point.Y, 0));
 }

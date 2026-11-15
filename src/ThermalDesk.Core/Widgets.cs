@@ -156,7 +156,7 @@ public static class WidgetLayout
         if (LogWidget.IsLog(w.Source))
         {
             string text = t.LogExcerpts.TryGetValue(LogWidget.Key(w), out var excerpt)
-                ? LogPresentation.Format(w, excerpt, t.Time)
+                ? LogPresentation.Format(w, excerpt, t.PresentationTime)
                 : "Waiting for log";
             return w.TextTemplate.Replace("{value}", text, StringComparison.Ordinal);
         }
@@ -166,7 +166,7 @@ public static class WidgetLayout
             return w.TextTemplate.Replace("{value}", process?.Summary ?? "—", StringComparison.Ordinal);
         }
         double? value = NumericValue(w, t);
-        string formatted = w.Source is WidgetSource.Clock or WidgetSource.Date ? t.Time.LocalDateTime.ToString(w.ValueFormat, CultureInfo.InvariantCulture)
+        string formatted = w.Source is WidgetSource.Clock or WidgetSource.Date ? t.PresentationTime.LocalDateTime.ToString(w.ValueFormat, CultureInfo.InvariantCulture)
             : value.HasValue && double.IsFinite(value.Value) ? value.Value.ToString(w.ValueFormat, CultureInfo.InvariantCulture) : "—";
         string coverage = w.Source switch { WidgetSource.CpuPowerAverageHour => t.CpuPowerHour.Coverage, WidgetSource.GpuPowerAverageHour => t.GpuPowerHour.Coverage, WidgetSource.EstimatedTotalPowerAverageHour => t.TotalPowerHour.Coverage,
             WidgetSource.CpuEnergyTodayKwh => new PowerAverage(null, t.EnergyToday.CpuSeconds).Coverage, WidgetSource.GpuEnergyTodayKwh => new PowerAverage(null, t.EnergyToday.GpuSeconds).Coverage,

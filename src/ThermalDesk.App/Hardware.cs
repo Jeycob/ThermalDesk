@@ -129,6 +129,9 @@ internal sealed class AioLcd : ILcd
 
 internal interface IFanController : IDisposable
 {
+    // Engine separates this potentially blocking read from the subsequent
+    // fresh-temperature decision. Legacy/in-memory transports need no baseline.
+    void CaptureBaseline(int port) { }
     void SetDuty(int port, int duty);
     void SetRgbFrame(int port, IReadOnlyList<LedColor> colors);
     FanReading Read(int port);
@@ -139,6 +142,7 @@ internal sealed class FanController : IFanController
 {
     private readonly IFanLink link;
     private readonly int inputLength;
+    private readonly Dictionary<int, int> captured = [];
     private readonly Dictionary<int, int> original = [];
     private bool retainCriticalDuty;
     private int disposed;
@@ -158,14 +162,21 @@ internal sealed class FanController : IFanController
         try { link.Write(Protocols.FanCommand(0xfe, 0x33, 0)); }
         catch { link.Dispose(); throw; }
     }
-    public void SetDuty(int port, int duty)
+    public void CaptureBaseline(int port)
     {
-        if (!original.ContainsKey(port))
+        if (!captured.ContainsKey(port))
         {
             var baseline = Read(port);
             if (baseline.Rpm <= 0 || baseline.Duty is < 30 or > 100) throw new IOException($"Port {port}: cannot confirm the original running duty. No speed command sent.");
-            original[port] = baseline.Duty;
+            captured[port] = baseline.Duty;
         }
+    }
+    public void SetDuty(int port, int duty)
+    {
+        CaptureBaseline(port);
+        // A cancelled readiness/baseline read never acquired speed ownership.
+        // Only ports with an attempted speed write participate in restoration.
+        original.TryAdd(port, captured[port]);
         link.Write(Protocols.SetDuty(port, duty));
     }
     public void PrepareToClose(bool criticalTemperature)
@@ -188,7 +199,7 @@ internal sealed class FanController : IFanController
         Thread.Sleep(1500);
         var reading = Read(port);
         if (reading.Duty != originalDuty) throw new IOException("Original duty was not confirmed; the controller will request the captured baseline on disposal.");
-        original.Remove(port);
+        original.Remove(port); captured.Remove(port);
         return reading;
     }
     public void Dispose()

@@ -18,6 +18,9 @@ internal sealed class WidgetDesignerForm : Form
     private readonly DesignerCanvas canvas;
     private readonly WidgetHistory history;
     private readonly Button undo, redo;
+    private sealed record PageChoice(int Number, string Label) { public override string ToString() => Label; }
+    private readonly ComboBox previewPage = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190, AccessibleName = "Preview page" };
+    private int activePage;
     private readonly ContextMenuStrip addMenu = new();
     private readonly ToolTip hints = new() { AutoPopDelay = 18000, InitialDelay = 350, ReshowDelay = 100 };
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
@@ -30,11 +33,12 @@ internal sealed class WidgetDesignerForm : Form
         (canvasWidth, canvasHeight) = WidgetLayout.Canvas(working, width, height);
         if (!working.UseCustomLayout && working.Widgets.Count == 0) working.Widgets = WidgetLayout.Defaults(canvasWidth, canvasHeight);
         working.UseCustomLayout = true; valid = working.Copy();
+        activePage = working.RotateWidgetGroups ? working.Widgets.Where(w => w.Group > 0).Select(w => w.Group).DefaultIfEmpty(0).Min() : -1;
         history = new(working, width, height, working.Widgets.FirstOrDefault()?.Id);
         Text = title + " · Widget designer"; Font = new Font("Segoe UI", 10); BackColor = Color.FromArgb(16, 25, 38); ForeColor = Color.White;
         ClientSize = new Size(1120, 740); MinimumSize = new Size(1000, 680); StartPosition = FormStartPosition.CenterParent;
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(12) };
-        root.RowStyles.Add(new(SizeType.Absolute, 42)); root.RowStyles.Add(new(SizeType.Absolute, 78)); root.RowStyles.Add(new(SizeType.Percent, 100)); root.RowStyles.Add(new(SizeType.Absolute, 52)); Controls.Add(root);
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(12) };
+        root.RowStyles.Add(new(SizeType.Absolute, 42)); root.RowStyles.Add(new(SizeType.Absolute, 78)); root.RowStyles.Add(new(SizeType.Absolute, 38)); root.RowStyles.Add(new(SizeType.Percent, 100)); root.RowStyles.Add(new(SizeType.Absolute, 52)); Controls.Add(root);
         root.Controls.Add(new Label { Dock = DockStyle.Fill, Text = $"{canvasWidth} × {canvasHeight} design pixels · drag to move · bottom-right handle to resize · arrow keys = 1 px (Shift = 10 px)\nDesign before rotation. The circle guide marks the round LCD crop. Editing never writes to USB.", ForeColor = Color.FromArgb(151, 172, 191) }, 0, 0);
         var tools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
         undo = MakeButton("Undo", () => RestoreHistory(false)); redo = MakeButton("Redo", () => RestoreHistory(true));
@@ -59,11 +63,16 @@ internal sealed class WidgetDesignerForm : Form
         tools.Controls.Add(nextPage);
         tools.Controls.Add(MakeButton("Back", () => Reorder(-1))); tools.Controls.Add(MakeButton("Front", () => Reorder(1)));
         tools.Controls.Add(MakeButton("Font…", PickFont)); tools.Controls.Add(MakeButton("Canvas color…", PickBackground)); tools.Controls.Add(MakeButton("Defaults", Defaults)); tools.Controls.Add(MakeButton("Export PNG…", Export)); root.Controls.Add(tools, 0, 1);
+        var pages = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        pages.Controls.Add(new Label { Text = "Preview page", AutoSize = true, Margin = new Padding(3, 6, 8, 0) }); pages.Controls.Add(previewPage);
+        pages.Controls.Add(new Label { Text = "Page 0 stays visible on every page", AutoSize = true, ForeColor = Color.Silver, Margin = new Padding(10, 6, 0, 0) });
+        root.Controls.Add(pages, 0, 2);
         var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
-        columns.ColumnStyles.Add(new(SizeType.Absolute, 170)); columns.ColumnStyles.Add(new(SizeType.Percent, 100)); columns.ColumnStyles.Add(new(SizeType.Absolute, 315)); root.Controls.Add(columns, 0, 2);
+        columns.ColumnStyles.Add(new(SizeType.Absolute, 170)); columns.ColumnStyles.Add(new(SizeType.Percent, 100)); columns.ColumnStyles.Add(new(SizeType.Absolute, 315)); root.Controls.Add(columns, 0, 3);
         list.BackColor = Color.FromArgb(22, 34, 48); list.ForeColor = Color.White; list.BorderStyle = BorderStyle.None;
+        list.FormattingEnabled = true; list.Format += (_, e) => { if (e.ListItem is LcdWidget w) e.Value = $"{(w.Group == 0 ? "Always" : "Page " + w.Group)} · {w.Name}"; };
         columns.Controls.Add(list, 0, 0);
-        canvas = new DesignerCanvas(() => working, () => Selected, telemetry, canvasWidth, canvasHeight, width == height);
+        canvas = new DesignerCanvas(() => working, () => Selected, telemetry, canvasWidth, canvasHeight, width == height, () => activePage);
         columns.Controls.Add(canvas, 1, 0); columns.Controls.Add(properties, 2, 0);
         properties.BackColor = properties.ViewBackColor = Color.FromArgb(22, 34, 48);
         properties.ForeColor = properties.ViewForeColor = Color.White;
@@ -77,8 +86,21 @@ internal sealed class WidgetDesignerForm : Form
         properties.HelpBackColor = BackColor; properties.HelpForeColor = Color.White;
         var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 }; footer.ColumnStyles.Add(new(SizeType.Percent, 100)); footer.ColumnStyles.Add(new(SizeType.Absolute, 110)); footer.ColumnStyles.Add(new(SizeType.Absolute, 110)); footer.Controls.Add(status, 0, 0);
         footer.Controls.Add(MakeButton("Cancel", () => { DialogResult = DialogResult.Cancel; Close(); }), 1, 0);
-        var apply = MakeButton("Apply layout", () => { if (Commit()) { DialogResult = DialogResult.OK; Close(); } }); footer.Controls.Add(apply, 2, 0); root.Controls.Add(footer, 0, 3);
-        list.SelectedIndexChanged += (_, _) => { if (!rebinding) { properties.SelectedObject = Selected is { } item ? new WidgetProperties(item) : null; canvas.RefreshFrame(); } };
+        var apply = MakeButton("Apply layout", () => { if (Commit()) { DialogResult = DialogResult.OK; Close(); } }); footer.Controls.Add(apply, 2, 0); root.Controls.Add(footer, 0, 4);
+        list.SelectedIndexChanged += (_, _) =>
+        {
+            if (rebinding) return;
+            if (Selected is { Group: > 0 } item && activePage >= 0) { activePage = item.Group; RefreshPageChoices(); }
+            properties.SelectedObject = Selected is { } selected ? new WidgetProperties(selected) : null; canvas.RefreshFrame();
+        };
+        previewPage.SelectedIndexChanged += (_, _) =>
+        {
+            if (rebinding || previewPage.SelectedItem is not PageChoice page) return;
+            activePage = page.Number;
+            if (Selected is { } selected && !DesignerCanvas.IsVisibleOnPage(selected, activePage))
+                list.SelectedItem = working.Widgets.FirstOrDefault(w => DesignerCanvas.IsVisibleOnPage(w, activePage));
+            canvas.RefreshFrame();
+        };
         properties.PropertyValueChanged += (_, _) => Commit();
         canvas.SelectionRequested += widget => { list.SelectedItem = widget; };
         canvas.GeometryChanged += () => { Commit(); properties.Refresh(); };
@@ -95,9 +117,28 @@ internal sealed class WidgetDesignerForm : Form
     private void Rebind(string? id)
     {
         rebinding = true;
-        try { list.Items.Clear(); list.Items.AddRange(working.Widgets.Cast<object>().ToArray()); list.SelectedItem = working.Widgets.FirstOrDefault(w => w.Id == id); properties.SelectedObject = Selected is { } item ? new WidgetProperties(item) : null; }
+        try
+        {
+            var selected = working.Widgets.FirstOrDefault(w => w.Id == id);
+            if (selected is { Group: > 0 } && activePage >= 0) activePage = selected.Group;
+            if (activePage > 0 && working.Widgets.All(w => w.Group != activePage)) activePage = working.RotateWidgetGroups ? 0 : -1;
+            RefreshPageChoices();
+            list.Items.Clear(); list.Items.AddRange(working.Widgets.Cast<object>().ToArray()); list.SelectedItem = selected;
+            properties.SelectedObject = Selected is { } item ? new WidgetProperties(item) : null;
+        }
         finally { rebinding = false; }
         canvas.RefreshFrame();
+    }
+    private void RefreshPageChoices()
+    {
+        bool wasRebinding = rebinding; rebinding = true;
+        try
+        {
+            previewPage.Items.Clear(); previewPage.Items.Add(new PageChoice(-1, "All pages (overlaid)")); previewPage.Items.Add(new PageChoice(0, "Always visible only (0)"));
+            foreach (int page in working.Widgets.Select(w => w.Group).Where(p => p > 0).Distinct().Order()) previewPage.Items.Add(new PageChoice(page, "Page " + page));
+            previewPage.SelectedItem = previewPage.Items.Cast<PageChoice>().Single(p => p.Number == activePage);
+        }
+        finally { rebinding = wasRebinding; }
     }
     private bool Commit()
     {
@@ -142,7 +183,7 @@ internal sealed class WidgetDesignerForm : Form
     private void Add(WidgetKind kind)
     {
         if (working.Widgets.Count >= 40) throw new ArgumentException("Maximum 40 widgets per display.");
-        var w = new LcdWidget { Name = "Widget " + (working.Widgets.Count + 1), X = 12, Y = Math.Min(20 + working.Widgets.Count * 10, canvasHeight - 44), Width = Math.Min(220, canvasWidth - 24), Height = 44, FontSize = canvasWidth < 240 ? 18 : 28 };
+        var w = new LcdWidget { Name = "Widget " + (working.Widgets.Count + 1), Group = Math.Max(0, activePage), X = 12, Y = Math.Min(20 + working.Widgets.Count * 10, canvasHeight - 44), Width = Math.Min(220, canvasWidth - 24), Height = 44, FontSize = canvasWidth < 240 ? 18 : 28 };
         w.Kind = kind;
         if (WidgetLayout.IsGraph(kind))
         {
@@ -182,7 +223,7 @@ internal sealed class WidgetDesignerForm : Form
         if (selected.Group == 0) selected.Group = 1;
         copy.Id = Guid.NewGuid().ToString("N"); copy.Group = next;
         copy.Name = (copy.Name.Length > 65 ? copy.Name[..65] : copy.Name) + " page " + next;
-        working.Widgets.Add(copy); working.RotateWidgetGroups = true; Rebind(copy.Id); Commit();
+        working.Widgets.Add(copy); working.RotateWidgetGroups = true; activePage = next; Rebind(copy.Id); Commit();
     }
     private void Delete() { if (Selected is not { } item) return; int i = list.SelectedIndex; working.Widgets.Remove(item); Rebind(working.Widgets.ElementAtOrDefault(Math.Max(0, i - 1))?.Id); Commit(); }
     private void Reorder(int delta)
@@ -213,13 +254,19 @@ internal sealed class WidgetDesignerForm : Form
     {
         using var dialog = new SaveFileDialog { Filter = "PNG image|*.png", FileName = "lcd-layout.png" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        using var renderer = new FrameRenderer(); using var frame = renderer.Render(telemetry(), working, physicalWidth, physicalHeight); frame.Save(dialog.FileName, ImageFormat.Png);
+        var export = working.Copy(); export.Widgets = export.Widgets.Where(w => DesignerCanvas.IsVisibleOnPage(w, activePage)).ToList(); export.RotateWidgetGroups = false;
+        using var renderer = new FrameRenderer(); using var frame = renderer.Render(DesignerCanvas.WithPresentationTime(telemetry()), export, physicalWidth, physicalHeight); frame.Save(dialog.FileName, ImageFormat.Png);
     }
     internal void RenderForTest(string path)
     {
         StartPosition = FormStartPosition.Manual; Location = new Point(-20000, -20000); ShowInTaskbar = false; Show(); PerformLayout(); canvas.RefreshFrame(); Application.DoEvents();
         using var image = new Bitmap(Width, Height); DrawToBitmap(image, new Rectangle(Point.Empty, Size)); image.Save(path, ImageFormat.Png); timer.Stop();
     }
+    internal int ActivePageForTest => activePage;
+    internal string? SelectedIdForTest => Selected?.Id;
+    internal void SelectPageForTest(int page) => previewPage.SelectedItem = previewPage.Items.Cast<PageChoice>().Single(p => p.Number == page);
+    internal void SelectWidgetForTest(string id) => list.SelectedItem = working.Widgets.Single(w => w.Id == id);
+    internal void ClickSelectedForTest() { if (Selected is { } selected) canvas.ClickCenterForTest(selected); }
     internal int ExerciseForTest()
     {
         int assertions = 0, initial = working.Widgets.Count;
@@ -264,6 +311,7 @@ internal sealed class DesignerCanvas : Control
     private readonly Func<Telemetry> telemetry;
     private readonly int width, height;
     private readonly bool round;
+    private readonly Func<int> activePage;
     private readonly FrameRenderer renderer = new();
     private Bitmap? frame;
     private Point origin;
@@ -271,8 +319,11 @@ internal sealed class DesignerCanvas : Control
     private bool moving, resizing;
     public event Action<LcdWidget>? SelectionRequested;
     public event Action? GeometryChanged;
-    public DesignerCanvas(Func<DisplaySettings> getSettings, Func<LcdWidget?> getSelection, Func<Telemetry> getTelemetry, int w, int h, bool circular)
-    { settings = getSettings; selection = getSelection; telemetry = getTelemetry; width = w; height = h; round = circular; Dock = DockStyle.Fill; BackColor = Color.FromArgb(10, 17, 29); DoubleBuffered = true; SetStyle(ControlStyles.Selectable, true); TabStop = true; }
+    public DesignerCanvas(Func<DisplaySettings> getSettings, Func<LcdWidget?> getSelection, Func<Telemetry> getTelemetry, int w, int h, bool circular, Func<int> getActivePage)
+    { settings = getSettings; selection = getSelection; telemetry = getTelemetry; width = w; height = h; round = circular; activePage = getActivePage; Dock = DockStyle.Fill; BackColor = Color.FromArgb(10, 17, 29); DoubleBuffered = true; SetStyle(ControlStyles.Selectable, true); TabStop = true; AccessibleName = "LCD widget canvas"; AccessibleDescription = "Select a visible widget, then drag or use arrow keys to move it. Shift moves ten pixels."; }
+    internal static bool IsVisibleOnPage(LcdWidget widget, int page) => page < 0 || widget.Group == 0 || widget.Group == page;
+    internal static Telemetry WithPresentationTime(Telemetry sample) => sample with { RenderTime = sample.RenderTime ?? DateTimeOffset.Now };
+    private IEnumerable<LcdWidget> VisibleWidgets() => settings().Widgets.Where(w => IsVisibleOnPage(w, activePage()));
     private RectangleF Area
     {
         get { float scale = Math.Max(.01f, Math.Min((ClientSize.Width - 40f) / width, (ClientSize.Height - 40f) / height)); return new((ClientSize.Width - width * scale) / 2, (ClientSize.Height - height * scale) / 2, width * scale, height * scale); }
@@ -282,9 +333,9 @@ internal sealed class DesignerCanvas : Control
     public void RefreshFrame()
     {
         try { var s = settings().Copy(); s.Rotation = 0;
-            if (s.RotateWidgetGroups && selection() is { Group: > 0 } selected) s.Widgets = s.Widgets.Where(w => w.Group == 0 || w.Group == selected.Group).ToList();
+            s.Widgets = s.Widgets.Where(w => IsVisibleOnPage(w, activePage())).ToList();
             s.RotateWidgetGroups = false;
-            var next = renderer.Render(telemetry(), s, width, height); var old = frame; frame = next; old?.Dispose(); }
+            var next = renderer.Render(WithPresentationTime(telemetry()), s, width, height); var old = frame; frame = next; old?.Dispose(); }
         catch (Exception) { /* Keep the last valid preview while a media file or property is being edited. */ }
         Invalidate();
     }
@@ -293,13 +344,13 @@ internal sealed class DesignerCanvas : Control
         base.OnPaint(e); e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic; var a = Area;
         if (frame is not null) e.Graphics.DrawImage(frame, a);
         using var guide = new Pen(Color.FromArgb(110, 140, 159)) { DashStyle = DashStyle.Dash }; e.Graphics.DrawRectangle(guide, a.X, a.Y, a.Width, a.Height); if (round) e.Graphics.DrawEllipse(guide, a);
-        if (selection() is { } item) { var box = View(item); using var pen = new Pen(Color.FromArgb(38, 218, 179), 2); e.Graphics.DrawRectangle(pen, box.X, box.Y, box.Width, box.Height); e.Graphics.FillRectangle(Brushes.White, box.Right - 7, box.Bottom - 7, 10, 10); }
+        if (selection() is { } item && IsVisibleOnPage(item, activePage())) { var box = View(item); using var pen = new Pen(Color.FromArgb(38, 218, 179), 2); e.Graphics.DrawRectangle(pen, box.X, box.Y, box.Width, box.Height); e.Graphics.FillRectangle(Brushes.White, box.Right - 7, box.Bottom - 7, 10, 10); }
     }
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e); if (e.Button != MouseButtons.Left) return; Focus();
-        if (selection() is { } current && new RectangleF(View(current).Right - 10, View(current).Bottom - 10, 18, 18).Contains(e.Location)) resizing = true;
-        else { var hit = settings().Widgets.AsEnumerable().Reverse().FirstOrDefault(w => View(w).Contains(e.Location)); if (hit is null) return; SelectionRequested?.Invoke(hit); moving = true; }
+        if (selection() is { } current && IsVisibleOnPage(current, activePage()) && new RectangleF(View(current).Right - 10, View(current).Bottom - 10, 18, 18).Contains(e.Location)) resizing = true;
+        else { var hit = VisibleWidgets().Reverse().FirstOrDefault(w => View(w).Contains(e.Location)); if (hit is null) return; SelectionRequested?.Invoke(hit); moving = true; }
         if (selection() is not { } selected) return; origin = Pixel(e.Location); original = new(selected.X, selected.Y, selected.Width, selected.Height); Capture = true;
     }
     protected override void OnMouseMove(MouseEventArgs e)
@@ -325,6 +376,11 @@ internal sealed class DesignerCanvas : Control
         e.Handled = true; GeometryChanged?.Invoke();
     }
     internal void NudgeForTest() => OnKeyDown(new KeyEventArgs(Keys.Right));
+    internal void ClickCenterForTest(LcdWidget widget)
+    {
+        var box = View(widget); int x = (int)(box.Left + box.Width / 2), y = (int)(box.Top + box.Height / 2);
+        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0)); OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0));
+    }
     internal void ResizeForTest()
     {
         if (selection() is not { } w) throw new InvalidOperationException("Select a widget first.");
@@ -344,8 +400,39 @@ internal sealed class DesignerCanvas : Control
     protected override void Dispose(bool disposing) { if (disposing) { frame?.Dispose(); renderer.Dispose(); } base.Dispose(disposing); }
 }
 
-internal sealed class WidgetProperties(LcdWidget widget)
+internal sealed class WidgetProperties(LcdWidget widget) : CustomTypeDescriptor
 {
+    public override object GetPropertyOwner(PropertyDescriptor? pd) => this;
+    public override PropertyDescriptorCollection GetProperties() => GetProperties(null);
+    public override PropertyDescriptorCollection GetProperties(Attribute[]? attributes) => new(TypeDescriptor.GetProperties(typeof(WidgetProperties), attributes)
+        .Cast<PropertyDescriptor>().Where(IsRelevant).ToArray(), true);
+    private bool IsRelevant(PropertyDescriptor property)
+    {
+        bool online = widget.Kind == WidgetKind.OnlineImage, gauge = WidgetLayout.IsGauge(widget.Kind), graph = WidgetLayout.IsGraph(widget.Kind);
+        if (property.Category == "8 · Online image") return online && (property.Name switch
+        {
+            nameof(OnlineRefreshSeconds) => widget.OnlineMode == OnlineMediaMode.Snapshot,
+            nameof(OnlineMaxFps) => widget.OnlineMode == OnlineMediaMode.Mjpeg, _ => true
+        });
+        if (property.Category == "6 · Log file") return !online && LogWidget.IsLog(widget.Source) && (property.Name != nameof(LogFile) || widget.Source == WidgetSource.TextFileLog);
+        if (property.Category == "7 · Graph") return graph;
+        if (property.Category == "5 · Gauge") return property.Name switch
+        {
+            nameof(Minimum) or nameof(Maximum) => gauge || graph && !widget.GraphAutoScale,
+            nameof(Thickness) => WidgetLayout.IsRadial(widget.Kind),
+            nameof(StartAngle) or nameof(SweepAngle) => widget.Kind is WidgetKind.RadialGauge or WidgetKind.RadialSegments or WidgetKind.RadialNeedle,
+            nameof(Segments) => widget.Kind == WidgetKind.RadialSegments,
+            nameof(TextColor) => gauge && widget.GaugeShowText,
+            _ => gauge
+        };
+        if (property.Category == "3 · Typography") return !online;
+        return property.Name switch
+        {
+            nameof(FanPort) => !online && widget.Source is WidgetSource.FanRpm or WidgetSource.FanDuty,
+            nameof(Source) or nameof(Text) or nameof(ValueFormat) or nameof(Foreground) => !online,
+            _ => true
+        };
+    }
     [Category("1 · Content"), DisplayName("Page (0 = always)"), Description("0 stays visible. Pages 1–16 rotate when Rotate widget pages is enabled for this LCD. Widgets on one page appear together; use the same rectangle on different pages.")]
     public int Group { get => widget.Group; set => widget.Group = value; }
     [Category("8 · Online image"), DisplayName("Direct image URL"), Description("Direct HTTP(S) JPEG/PNG snapshot or multipart MJPEG, not a webpage/RTSP/HLS. Local IP cameras are allowed. No redirects, cookies, browser or embedded passwords. The source is fetched only in Live; never uploaded.")]
