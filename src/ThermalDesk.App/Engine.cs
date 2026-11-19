@@ -37,8 +37,12 @@ internal sealed class Engine
     internal OnlineMediaCache OnlineMedia { get; } = new();
     private volatile bool controllerFault;
     public bool ControllerFault => controllerFault;
-    private double lastSensorReadMilliseconds;
-    private double lastSensorGapMilliseconds;
+    private readonly SamplerDiagnosticsRecorder samplerDiagnostics = new();
+    internal SamplerDiagnosticSnapshot SamplerDiagnostics => samplerDiagnostics.Snapshot();
+    private ControllerFaultEvidence? lastControllerFault;
+    internal ControllerFaultEvidence? LastControllerFault => Volatile.Read(ref lastControllerFault);
+    private TelemetryDecisionException TelemetryFault(string reason, Telemetry sample, DateTimeOffset decisionTime) =>
+        new(new(decisionTime, reason, sample, SamplerDiagnostics, true));
     public Telemetry Latest
     {
         get
@@ -83,7 +87,7 @@ internal sealed class Engine
         if (live && settings.HasUsbSelection && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
         var s = settings.Copy(); Volatile.Write(ref current, s); stop = new(); var token = stop.Token; Live = live; conflictingController = false; controllerFault = false;
         Status.Clear(); Fans.Clear(); FanCommands.Clear(); FrameRenderCounts.Clear();
-        Volatile.Write(ref lastSensorReadMilliseconds, 0); Volatile.Write(ref lastSensorGapMilliseconds, 0);
+        samplerDiagnostics.Reset(); Volatile.Write(ref lastControllerFault, null);
         latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
         activity = ProcessActivity.Disabled; processLog.Clear();
         Volatile.Write(ref excerpts, LogExcerpt.Empty); Volatile.Write(ref merged, null);
@@ -163,41 +167,55 @@ internal sealed class Engine
         Monitoring? monitor = null;
         var history = new TelemetryHistory(live && testTelemetry is null ? DailyEnergyStore.Load() : null,
             restoredRollingEnergy: live && testTelemetry is null ? RollingEnergyStore.Load() : null);
-        long previousSampleStart = 0;
         try
         {
             while (!token.IsCancellationRequested)
             {
                 int seconds = SensorInterval(Volatile.Read(ref current));
                 long sampleStart = Stopwatch.GetTimestamp();
-                if (previousSampleStart != 0) Volatile.Write(ref lastSensorGapMilliseconds, Stopwatch.GetElapsedTime(previousSampleStart, sampleStart).TotalMilliseconds);
-                previousSampleStart = sampleStart;
+                samplerDiagnostics.BeginIteration(DateTimeOffset.UtcNow, sampleStart);
                 try
                 {
                     if (live)
                     {
+                        samplerDiagnostics.EnterPhase("ConflictScan");
                         conflictingController = Volatile.Read(ref current).HasUsbSelection && conflicts().Length > 0;
                         if (conflictingController) { stop?.Cancel(); Note("Conflicting controller detected; cancelling live control."); }
                         Telemetry reading;
-                        if (testTelemetry is not null) reading = testTelemetry();
-                        else { monitor ??= new(); reading = monitor.Read(Volatile.Read(ref current).PreferredGpuId); }
-                        Volatile.Write(ref latest, history.Add(reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray(), ExpectedSampleSeconds = seconds }, Volatile.Read(ref current)));
+                        if (testTelemetry is not null)
+                        {
+                            samplerDiagnostics.BeginMeasurement(DateTimeOffset.UtcNow, Stopwatch.GetTimestamp());
+                            reading = testTelemetry();
+                        }
+                        else
+                        {
+                            if (monitor is null) { samplerDiagnostics.EnterPhase("MonitorInit"); monitor = new(); }
+                            reading = monitor.Read(Volatile.Read(ref current).PreferredGpuId, samplerDiagnostics);
+                        }
+                        samplerDiagnostics.EnterPhase("History");
+                        var published = history.Add(reading with { Fans = Fans.Values.OrderBy(f => f.Port).ToArray(), ExpectedSampleSeconds = seconds }, Volatile.Read(ref current));
+                        Volatile.Write(ref latest, published); samplerDiagnostics.Published(published);
                     }
                     else
                     {
+                        samplerDiagnostics.BeginMeasurement(DateTimeOffset.UtcNow, Stopwatch.GetTimestamp());
                         double x = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 20d;
                         var preview = new Telemetry(DateTimeOffset.UtcNow, 48 + Math.Sin(x) * 5, 42 + Math.Cos(x) * 4, 12, 8, 31, "Simulated preview")
                         { CpuPowerWatts = 50 + Math.Sin(x) * 10, GpuPowerWatts = 35 + Math.Cos(x) * 12, ExpectedSampleSeconds = seconds };
-                        Volatile.Write(ref latest, history.Add(preview, Volatile.Read(ref current)));
+                        samplerDiagnostics.EnterPhase("History");
+                        var published = history.Add(preview, Volatile.Read(ref current));
+                        Volatile.Write(ref latest, published); samplerDiagnostics.Published(published);
                     }
                     SetStatus("Sensors", (Latest.Warning.Length == 0 ? "CPU / GPU / RAM · shared sampler" : Latest.Warning) + $" · {seconds} s interval");
                 }
                 catch (Exception e)
                 {
-                    Volatile.Write(ref latest, new(DateTimeOffset.UtcNow, null, null, null, null, null, e.Message));
-                    SetStatus("Sensors", "ERROR · " + e.Message); monitor?.Dispose(); monitor = null;
+                    var unavailable = new Telemetry(DateTimeOffset.UtcNow, null, null, null, null, null, e.Message);
+                    Volatile.Write(ref latest, unavailable); samplerDiagnostics.Published(unavailable);
+                    SetStatus("Sensors", "ERROR · " + e.Message);
+                    samplerDiagnostics.EnterPhase("MonitorDispose"); monitor?.Dispose(); monitor = null;
                 }
-                Volatile.Write(ref lastSensorReadMilliseconds, Stopwatch.GetElapsedTime(sampleStart).TotalMilliseconds);
+                samplerDiagnostics.CompleteIteration();
                 // PollSeconds is a start-to-start interval. Adding a full delay
                 // after a slow read could age a valid sample past the unchanged
                 // five-second cooling limit before the next read completed.
@@ -207,7 +225,12 @@ internal sealed class Engine
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        finally { monitor?.Dispose(); }
+        finally
+        {
+            samplerDiagnostics.EnterPhase("MonitorDispose");
+            try { monitor?.Dispose(); }
+            finally { samplerDiagnostics.Stopped(); }
+        }
     }
     private async Task DailyEnergyLoop(CancellationToken token)
     {
@@ -390,7 +413,7 @@ internal sealed class Engine
                         var notReady = initialDecisions.Values.FirstOrDefault(d => d.Duty is null);
                         if (notReady is null) break;
                         if (startupWait.Elapsed >= initialTemperatureTimeout)
-                            throw new IOException("Temperature readiness timed out. No fan controller opened or speed command sent. Keep vendor cooling active. " + notReady.Reason);
+                            throw TelemetryFault("Temperature readiness timed out. No fan controller opened or speed command sent. Keep vendor cooling active. " + notReady.Reason, sample, now);
                         SetStatus("Controller", "Waiting for valid temperatures · no fan-controller commands · " + notReady.Reason);
                         await Task.Delay(50, token);
                     }
@@ -406,8 +429,9 @@ internal sealed class Engine
                             if (confirmation.RequestedDuty == 100) continue;
                             Guard(token);
                             var activePort = Volatile.Read(ref current).Ports.Single(p => p.Port == port);
-                            var decision = policies[port].Evaluate(activePort, Latest, DateTimeOffset.UtcNow, 0);
-                            if (decision.Duty is null) throw new IOException(decision.Reason);
+                            var decisionSample = Latest; var decisionTime = DateTimeOffset.UtcNow;
+                            var decision = policies[port].Evaluate(activePort, decisionSample, decisionTime, 0);
+                            if (decision.Duty is null) throw TelemetryFault(decision.Reason, decisionSample, decisionTime);
                             controller.SetDuty(port, decision.Duty.Value);
                             confirmation.Command(decision.Duty.Value, clock.Elapsed.TotalSeconds);
                             FanCommands[port] = new(port, decision.Duty.Value, decision.TargetDuty ?? decision.Duty.Value, decision.Reason + " · " + confirmation.Description, DateTimeOffset.UtcNow);
@@ -421,8 +445,9 @@ internal sealed class Engine
                         // later speed write after cancellation or a thermal change.
                         var activePort = Volatile.Read(ref current).Ports.Single(x => x.Port == p.Port);
                         policies[p.Port].Reset();
-                        var initial = policies[p.Port].Evaluate(activePort, Latest, DateTimeOffset.UtcNow, 0);
-                        if (initial.Duty is null) throw new IOException(initial.Reason);
+                        var initialSample = Latest; var initialTime = DateTimeOffset.UtcNow;
+                        var initial = policies[p.Port].Evaluate(activePort, initialSample, initialTime, 0);
+                        if (initial.Duty is null) throw TelemetryFault(initial.Reason, initialSample, initialTime);
                         controller.SetDuty(p.Port, initial.Duty.Value);
                         confirmations[p.Port] = new(initial.Duty.Value, clock.Elapsed.TotalSeconds);
                         FanCommands[p.Port] = new(p.Port, initial.Duty.Value, initial.TargetDuty ?? initial.Duty.Value, initial.Reason + " · " + confirmations[p.Port].Description, DateTimeOffset.UtcNow);
@@ -441,8 +466,9 @@ internal sealed class Engine
                         // A read may cross the safety age limit before the next
                         // scheduled curve evaluation. Never retry an unconfirmed
                         // command from expired data in that intervening window.
-                        if (monitored.Length > 0 && !FanSafety.IsFresh(Latest, DateTimeOffset.UtcNow))
-                            throw new IOException("Stale telemetry · release software control; do not force full speed");
+                        var freshnessSample = Latest; var freshnessTime = DateTimeOffset.UtcNow;
+                        if (monitored.Length > 0 && !FanSafety.IsFresh(freshnessSample, freshnessTime))
+                            throw TelemetryFault("Stale telemetry · release software control; do not force full speed", freshnessSample, freshnessTime);
                         double controlTime = clock.Elapsed.TotalSeconds;
                         bool due = controlTime >= nextControl;
                         // A critical sample takes priority between every bounded
@@ -457,8 +483,9 @@ internal sealed class Engine
                         foreach (var p in monitored)
                         {
                             Guard(token);
-                            var decision = policies[p.Port].Evaluate(p, Latest, DateTimeOffset.UtcNow, controlSeconds);
-                            if (decision.Duty is null) throw new IOException(decision.Reason);
+                            var decisionSample = Latest; var decisionTime = DateTimeOffset.UtcNow;
+                            var decision = policies[p.Port].Evaluate(p, decisionSample, decisionTime, controlSeconds);
+                            if (decision.Duty is null) throw TelemetryFault(decision.Reason, decisionSample, decisionTime);
                             var confirmation = confirmations[p.Port];
                             if (confirmation.RequestedDuty != decision.Duty.Value)
                             {
@@ -536,16 +563,16 @@ internal sealed class Engine
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
                 catch (Exception e)
                 {
+                    var fault = ControllerFaultEvidence.FromException(e, () => Latest, () => SamplerDiagnostics);
+                    Volatile.Write(ref lastControllerFault, fault);
                     controllerFault = true;
-                    var faultSample = Latest;
-                    var faultTime = DateTimeOffset.UtcNow;
-                    string cause = e.Message + $" · sample age {(faultTime - faultSample.Time).TotalSeconds:0.00} s; last read {Volatile.Read(ref lastSensorReadMilliseconds):0} ms; sample gap {Volatile.Read(ref lastSensorGapMilliseconds):0} ms";
+                    string cause = e.Message + $" · sample age {fault.SampleAgeSeconds:0.00} s; last read (previous completed iteration) {fault.LastReadMilliseconds:0} ms; sample gap (iteration starts) {fault.SampleGapMilliseconds:0} ms; active phase {fault.Sampler.Phase} {fault.Sampler.ActiveProvider} {fault.Sampler.ActiveDevice} {fault.Sampler.CurrentPhaseElapsedMilliseconds:0} ms";
                     if (testTelemetry is null)
                     {
                         try
                         {
                             var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ThermalDesk", "last-controller-fault.json");
-                            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new { time = faultTime, reason = e.Message, sampleTime = faultSample.Time, sampleAgeSeconds = (faultTime - faultSample.Time).TotalSeconds, lastReadMilliseconds = Volatile.Read(ref lastSensorReadMilliseconds), sampleGapMilliseconds = Volatile.Read(ref lastSensorGapMilliseconds), faultSample.CpuTemperature, faultSample.GpuTemperature }, Settings.JsonOptions));
+                            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(fault, Settings.JsonOptions));
                         }
                         catch (Exception diagnosticError) when (diagnosticError is IOException or UnauthorizedAccessException) { Note("Could not save controller fault: " + diagnosticError.GetType().Name); }
                     }

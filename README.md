@@ -207,6 +207,12 @@ reads do not add a full polling delay. The five-second stale-data guard still
 latches a cooling fault; port status includes the shared cause. The last fault's
 reason, sample age and sampler timing are kept in
 `%LOCALAPPDATA%\ThermalDesk\last-controller-fault.json` (one overwritten file).
+The report also records the active sampling phase and hardware identifier, with
+monotonic elapsed times. The last completed read duration is distinct from an
+in-progress read: a short previous read does not rule out a later driver stall.
+Diagnostic exports and optional acceptance status include the same sampler
+snapshot. A stale-data fault still requires Stop followed by Start live control;
+wait for Stop to finish before retrying.
 
 ## Troubleshooting
 

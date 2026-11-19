@@ -49,16 +49,90 @@ internal static class SensorCadenceChecks
         }
         catch (Exception e) { File.WriteAllText(path, JsonSerializer.Serialize(new { passed = false, error = e.Message, log = stalled.Logs })); return 1; }
         finally { stalled.Stop().GetAwaiter().GetResult(); }
+        using var enteredRead = new ManualResetEventSlim();
+        using var releaseRead = new ManualResetEventSlim();
+        int iterations = 0, blockedOpens = 0; var blockedController = new FakeController();
+        var blocked = new Engine(_ => { Interlocked.Increment(ref blockedOpens); return blockedController; }, () =>
+        {
+            var sampleTime = DateTimeOffset.UtcNow;
+            if (Interlocked.Increment(ref iterations) == 2) { enteredRead.Set(); releaseRead.Wait(); }
+            return new Telemetry(sampleTime, 56.125, 40, 0, 0, 30);
+        }, () => []);
+        try
+        {
+            blocked.Start(settings, true);
+            Check(SpinWait.SpinUntil(() => blockedController.Writes > 0, 3000), "Fresh sample establishes control before a later blocked read");
+            Check(enteredRead.Wait(3500), "Second mock sensor read reaches the blocking point");
+            var inFlight = blocked.SamplerDiagnostics;
+            Check(inFlight.Phase == "SensorRead" && inFlight.Probe.IterationInProgress && inFlight.Probe.IterationId == 2,
+                "Atomic probe reports the current blocked sensor iteration");
+            Check(inFlight.Probe.PreviousCompletedIterationId == 1 && inFlight.Probe.LastPublishedIterationId == 1,
+                "Previous completed and published samples remain distinct from the in-flight iteration");
+            Check(SpinWait.SpinUntil(() => blocked.ControllerFault && blockedController.Disposals == 1, 6500),
+                "Blocked current read still releases control once at the unchanged stale limit");
+            var fault = blocked.LastControllerFault ?? throw new InvalidOperationException("Missing blocked-read evidence");
+            Check(fault.CapturedAtDecision && fault.SampleAgeSeconds > 5 && fault.Sampler.Phase == "SensorRead" &&
+                fault.Sampler.Probe.IterationId == 2 && fault.Sampler.Probe.PreviousCompletedIterationId == 1,
+                "Stale decision preserves the old sample and active blocked-read phase");
+            Check(fault.Sampler.CurrentPhaseElapsedMilliseconds > fault.LastReadMilliseconds && fault.Sampler.LastPublishedMeasurementAgeMilliseconds >= 5000,
+                "Fault exposes active read duration and measurement age instead of implying the last completed read is current");
+            Check(blockedController.Writes == 1 && blockedController.CriticalCloses == 0 && blockedOpens == 1,
+                "Stale telemetry sends no retry or synthetic critical command and never reconnects");
+            releaseRead.Set();
+            Check(SpinWait.SpinUntil(() => blocked.SamplerDiagnostics.Probe.PreviousCompletedIterationId >= 2, 3000),
+                "Sampler can finish independently after the controller fault");
+            Check(ReferenceEquals(fault, blocked.LastControllerFault) && fault.Sampler.Probe.PreviousCompletedIterationId == 1 &&
+                blocked.SamplerDiagnostics.Probe.LastPublishedIterationId >= 2 && blockedController.Disposals == 1,
+                "Later publication cannot mutate latched evidence or reopen the controller");
+        }
+        catch (Exception e) { File.WriteAllText(path, JsonSerializer.Serialize(new { passed = false, error = e.Message, log = blocked.Logs })); return 1; }
+        finally { releaseRead.Set(); blocked.Stop().GetAwaiter().GetResult(); }
+        try
+        {
+            // Force the publication race without timing a thread between throw
+            // and catch: this is the same evidence selection used by FanLoop.
+            var recorder = new SamplerDiagnosticsRecorder();
+            var sampleTime = DateTimeOffset.UtcNow.AddSeconds(-6);
+            long sampleTicks = Stopwatch.GetTimestamp() - 6 * Stopwatch.Frequency;
+            var expired = new Telemetry(sampleTime, 56.125, 40, 0, 0, 30);
+            recorder.BeginIteration(sampleTime, sampleTicks);
+            recorder.BeginMeasurement(sampleTime, sampleTicks); recorder.Published(expired);
+            var evidence = new ControllerFaultEvidence(DateTimeOffset.UtcNow, "Stale telemetry", expired, recorder.Snapshot(), true);
+            var error = new TelemetryDecisionException(evidence);
+            var fresh = new Telemetry(DateTimeOffset.UtcNow, 47, 39, 0, 0, 30);
+            recorder.BeginIteration(fresh.Time, Stopwatch.GetTimestamp());
+            recorder.BeginMeasurement(fresh.Time, Stopwatch.GetTimestamp()); recorder.Published(fresh);
+            int fallbackReads = 0;
+            var captured = ControllerFaultEvidence.FromException(error, () => { fallbackReads++; return fresh; }, recorder.Snapshot);
+            Check(ReferenceEquals(captured, evidence) && fallbackReads == 0 && captured.SampleTime == expired.Time && captured.SampleAgeSeconds >= 6,
+                "Fresh publication between stale decision and catch cannot replace the exact offending sample");
+            Check(captured.Sampler.Probe.LastPublishedIterationId == 1 && recorder.Snapshot().Probe.LastPublishedIterationId == 2,
+                "Decision-time diagnostic probe remains immutable across a fresh publication");
+            using var json = JsonDocument.Parse(JsonSerializer.Serialize(captured, Settings.JsonOptions));
+            var root = json.RootElement;
+            Check(root.GetProperty("sampleTime").GetDateTimeOffset() == expired.Time && root.GetProperty("sampleAgeSeconds").GetDouble() >= 6 &&
+                root.TryGetProperty("time", out _) && root.TryGetProperty("reason", out _) && root.TryGetProperty("lastReadMilliseconds", out _) &&
+                root.TryGetProperty("sampleGapMilliseconds", out _) && root.TryGetProperty("CpuTemperature", out _) && root.TryGetProperty("GpuTemperature", out _),
+                "Fault JSON preserves legacy field names and exact stale-decision values");
+            Check(root.GetProperty("lastReadMeaning").GetString()!.Contains("Previous completed") && root.TryGetProperty("sampler", out _),
+                "Fault JSON labels previous completed timing and includes current sampler evidence");
+            var observed = recorder.Snapshot();
+            var clockShift = recorder.Snapshot(observed.ObservedUtc.AddSeconds(30), observed.ObservedTimestamp);
+            Check(Math.Abs((clockShift.LastPublishedClockDifferenceMilliseconds - observed.LastPublishedClockDifferenceMilliseconds)!.Value - 30000) < 1 &&
+                clockShift.LastPublishedMeasurementAgeMilliseconds == observed.LastPublishedMeasurementAgeMilliseconds,
+                "Clock changes are visible without changing monotonic measurement age");
+        }
+        catch (Exception e) { File.WriteAllText(path, JsonSerializer.Serialize(new { passed = false, error = e.Message })); return 1; }
         File.WriteAllText(path, JsonSerializer.Serialize(new { passed = true, hardwareAccess = false, count = checks.Count, checks }));
         return 0;
     }
     private sealed class FakeController : IFanController
     {
-        public int Writes, Disposals;
+        public int Writes, Disposals, CriticalCloses;
         public void SetDuty(int port, int duty) => Interlocked.Increment(ref Writes);
         public void SetRgbFrame(int port, IReadOnlyList<LedColor> colors) { }
         public FanReading Read(int port) => new(port, 900, 40);
-        public void PrepareToClose(bool criticalTemperature) { }
+        public void PrepareToClose(bool criticalTemperature) { if (criticalTemperature) Interlocked.Increment(ref CriticalCloses); }
         public void Dispose() => Interlocked.Increment(ref Disposals);
     }
 }

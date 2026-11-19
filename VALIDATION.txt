@@ -1,3 +1,19 @@
+ThermalDesk 0.3.26 — in-flight sampler fault diagnostics — 2026-11-19
+
+- Release build using pinned .NET SDK 10.0.404: zero warnings/errors.
+- 1710 Core, 1108 offline application, 24 sampler and 44 mocked startup
+  migration assertions passed (2886 total).
+- New sampler checks reproduce a blocked second sensor read, distinguish it
+  from the previous completed read, preserve exact fault evidence across a
+  newer publication, and verify a single release with no automatic reconnect.
+- Fault JSON compatibility and independent wall/monotonic timing checked.
+- Five-second stale guard, temperature thresholds, controller ownership,
+  sensor order and release behavior remain unchanged.
+- No physical sensor or USB device was opened by the offline checks. The
+  reported game-time driver stall has not been reproduced in these tests.
+- Dependencies are unchanged; locked restore used the existing local NuGet
+  feed. NuGet vulnerability audit was explicitly skipped for this offline run.
+
 ThermalDesk 0.3.25 — reliability and UI audit fixes — 2026-11-15
 
 - Windows x64, private Microsoft .NET SDK 10.0.404, SHA-512 verified against

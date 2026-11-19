@@ -516,7 +516,7 @@ internal sealed partial class MainForm : Form
         if (engine.Running && !engine.Live && settings.StartLiveAtSignIn && !settings.HasLiveSelection)
             sessionText = "PREVIEW · no live output selected · automatic Live is paused";
         session.ForeColor = engine.ControllerFault || engine.Cancelled ? Color.FromArgb(255, 194, 100) : Accent;
-        SetText(liveButton, engine.Running && engine.Live ? "Running · automatic" : settings.AllowMonitoringOnly && !settings.HasUsbSelection ? "Start monitoring" : "Start live control");
+        SetText(liveButton, engine.ControllerFault && engine.Running ? "Blocked · Stop before retry" : engine.Running && engine.Live ? "Running · automatic" : settings.AllowMonitoringOnly && !settings.HasUsbSelection ? "Start monitoring" : "Start live control");
         liveButton.Enabled = !engine.Running || !engine.Live;
         if (engine.ControllerFault) sessionText = "CONTROLLER BLOCKED / FAULT · see log · verify vendor control";
         if (startupWarning.Length > 0) { sessionText += " · PROFILE RECOVERY"; session.ForeColor = Color.Orange; }
@@ -608,7 +608,7 @@ internal sealed partial class MainForm : Form
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(AcceptanceStatusPath)!);
-            File.WriteAllText(AcceptanceStatusPath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.Running, engine.Live, engine.Cancelled, administrator = StartupManager.Elevated, telemetry = engine.Latest, fans = engine.Fans.Values.OrderBy(x => x.Port), fanCommands = engine.FanCommands.Values.OrderBy(x => x.Port), status = engine.Status, log = engine.Logs.TakeLast(12) }, Settings.JsonOptions));
+            File.WriteAllText(AcceptanceStatusPath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.Running, engine.Live, engine.Cancelled, administrator = StartupManager.Elevated, telemetry = engine.Latest, sampler = engine.SamplerDiagnostics, controllerFault = engine.LastControllerFault, fans = engine.Fans.Values.OrderBy(x => x.Port), fanCommands = engine.FanCommands.Values.OrderBy(x => x.Port), status = engine.Status, log = engine.Logs.TakeLast(12) }, Settings.JsonOptions));
         }
         catch (Exception error) { session.Text = "Acceptance status output failed: " + error.Message; }
     }
@@ -729,7 +729,7 @@ internal sealed partial class MainForm : Form
     {
         using var d = new SaveFileDialog { Filter = "JSON diagnostic report|*.json", FileName = "thermaldesk-diagnostics.json" };
         if (d.ShowDialog() != DialogResult.OK) return;
-        File.WriteAllText(d.FileName, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, devices = HidLink.Inventory(), session = engine.Status, telemetry = engine.Latest, fans = engine.Fans, log = engine.Logs }, Settings.JsonOptions));
+        File.WriteAllText(d.FileName, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, devices = HidLink.Inventory(), session = engine.Status, telemetry = engine.Latest, sampler = engine.SamplerDiagnostics, controllerFault = engine.LastControllerFault, fans = engine.Fans, log = engine.Logs }, Settings.JsonOptions));
     }
     private void HideToTray() { tray.Visible = true; refresh.Interval = 5000; Hide(); }
     private void RestoreFromTray() { refresh.Interval = 1000; Show(); WindowState = FormWindowState.Normal; Activate(); if (!busy) RefreshData(); }

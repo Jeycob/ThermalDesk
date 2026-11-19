@@ -20,13 +20,18 @@ internal sealed class Monitoring : IDisposable
         catch (Exception e) when (e is not OutOfMemoryException and not AccessViolationException)
         { initializationWarning = "Hardware sensor initialization unavailable · " + e.GetType().Name; try { computer.Close(); } catch { } }
     }
-    public Telemetry Read(string preferredGpuId = "")
+    public Telemetry Read(string preferredGpuId = "", SamplerDiagnosticsRecorder? diagnostics = null)
     {
         var devices = new List<HardwareSnapshot>(); var warnings = new List<string>();
+        long sampleTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         var sampleTime = DateTimeOffset.UtcNow;
+        diagnostics?.BeginMeasurement(sampleTime, sampleTimestamp);
         void Visit(IHardware h, List<SensorReading> sensors)
         {
+            string device = h.Identifier.ToString(), provider = h.GetType().Name;
+            diagnostics?.EnterPhase("HardwareUpdate", device, provider);
             h.Update();
+            diagnostics?.EnterPhase("SensorProjection", device, provider);
             foreach (var s in h.Sensors)
             {
                 if (NormalizeReading(s.Name, s.SensorType, s.Value) is { } reading) sensors.Add(reading);
@@ -53,8 +58,11 @@ internal sealed class Monitoring : IDisposable
                 AdapterKind = h.GetType().Name switch { "IntelIntegratedGpu" => GpuAdapterKind.Integrated, "IntelDiscreteGpu" => GpuAdapterKind.Discrete, _ => GpuAdapterKind.Unknown }
             });
         }
+        diagnostics?.EnterPhase("GpuSelection");
         var result = selection.Project(devices, sampleTime, preferredGpuId);
+        diagnostics?.EnterPhase("WindowsFallback");
         var system = fallback.Read();
+        diagnostics?.EnterPhase("ReadComplete");
         if (initializationWarning.Length > 0) warnings.Add(initializationWarning);
         if (result.Warning.Length > 0) warnings.Add(result.Warning);
         return result with
