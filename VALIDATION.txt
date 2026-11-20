@@ -1,3 +1,22 @@
+ThermalDesk 0.3.27 — Windows suspend lifecycle and truthful cleanup — 2026-11-20
+
+- Release build with pinned .NET SDK 10.0.404: zero warnings/errors.
+- 1710 Core, 1161 offline application, 25 sampler and 44 mocked startup
+  migration assertions passed (2940 total).
+- 29 new engine and 24 new UI checks cover cancellation during in-flight IO,
+  a timed-out Stop waiter retaining ownership, shared cleanup, duplicate resume,
+  pending close, pre-suspend confirmations, startup races, cleanup failure,
+  retained original fault evidence and explicit manual restart after resume.
+- A sampler regression waits for asynchronous status publication and confirms
+  that the original port fault remains visible after completed cleanup.
+- Power tests call the application's handler with injected hardware. They do
+  not suspend Windows or open physical USB devices. A real suspend/resume cycle
+  has not been performed for this release; live deployment checks are separate.
+- Freshness/temperature limits and HID timeouts are unchanged. A completed
+  cleanup request does not claim independently confirmed hardware restoration.
+- Locked dependencies unchanged; local NuGet feed used with vulnerability audit
+  explicitly skipped for the offline validation run.
+
 ThermalDesk 0.3.26 — in-flight sampler fault diagnostics — 2026-11-19
 
 - Release build using pinned .NET SDK 10.0.404: zero warnings/errors.

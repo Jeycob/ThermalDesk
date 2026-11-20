@@ -42,10 +42,15 @@ internal static class SensorCadenceChecks
             Check(SpinWait.SpinUntil(() => stalledController.Writes > 0, 3000), "Fresh sample establishes mock control");
             Volatile.Write(ref stale, 1);
             Check(SpinWait.SpinUntil(() => stalled.ControllerFault, 6000), "Truly stale telemetry still latches with the five-second limit unchanged");
-            Check(stalled.Status.TryGetValue("Port 1", out var status) && status.Contains("Stale telemetry"), "Port status includes the shared controller fault cause");
+            // The fault latch and the per-port status are separate publications.
+            // Wait for the observable cause rather than racing the latch write.
+            Check(SpinWait.SpinUntil(() => stalled.Status.TryGetValue("Port 1", out var status) && status.Contains("Stale telemetry"), 2000), "Port status includes the shared controller fault cause");
             Check(stalled.Logs.Any(line => line.Contains("sample age") && line.Contains("last read")), "Fault log preserves sensor timing evidence");
             Thread.Sleep(300);
             Check(stalledOpens == 1 && stalledController.Disposals == 1, "Fault releases once and never automatically reconnects");
+            stalled.Stop().GetAwaiter().GetResult();
+            Check(stalled.Status.TryGetValue("Port 1", out var releasedStatus) && releasedStatus.Contains("Stale telemetry"),
+                "Completed controller cleanup and session stop retain the original cause on every affected port");
         }
         catch (Exception e) { File.WriteAllText(path, JsonSerializer.Serialize(new { passed = false, error = e.Message, log = stalled.Logs })); return 1; }
         finally { stalled.Stop().GetAwaiter().GetResult(); }

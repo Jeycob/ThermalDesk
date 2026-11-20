@@ -55,6 +55,8 @@ internal static class WidgetChecks
             count += PowerGraphChecks.Run(directory);
             count += PresentationChecks.Run(directory);
             count += ControllerReliabilityChecks.Run();
+            count += PowerLifecycleChecks.Run();
+            count += PowerUiChecks.Run(directory);
             count += EditorRegressionChecks.Run(directory);
             count += ReliabilityChecks.Run();
             count += TelemetryPresentationChecks.Run(directory);

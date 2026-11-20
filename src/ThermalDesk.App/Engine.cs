@@ -12,8 +12,9 @@ internal sealed class Engine
     private readonly TimeSpan initialTemperatureTimeout;
     private readonly Func<bool, int, ILcd> openDisplay;
     private readonly TimeSpan displayRetryDelay;
+    private readonly TimeSpan stopWaitTimeout;
     public Engine() : this(serial => new FanController(serial), null, Conflicts) { }
-    internal Engine(Func<string, IFanController> controllerFactory, Func<Telemetry>? telemetryReader, Func<string[]> findConflicts, TimeSpan? startupTimeout = null, Func<bool, int, ILcd>? displayFactory = null, TimeSpan? lcdRetryDelay = null)
+    internal Engine(Func<string, IFanController> controllerFactory, Func<Telemetry>? telemetryReader, Func<string[]> findConflicts, TimeSpan? startupTimeout = null, Func<bool, int, ILcd>? displayFactory = null, TimeSpan? lcdRetryDelay = null, TimeSpan? stopWaitTimeout = null)
     {
         openController = controllerFactory; testTelemetry = telemetryReader; conflicts = findConflicts;
         initialTemperatureTimeout = startupTimeout ?? TimeSpan.FromSeconds(20);
@@ -21,9 +22,20 @@ internal sealed class Engine
         openDisplay = displayFactory ?? ((panel, brightness) => panel ? new PanelLcd(brightness) : new AioLcd(brightness));
         displayRetryDelay = lcdRetryDelay ?? TimeSpan.FromSeconds(5);
         if (displayRetryDelay < TimeSpan.FromMilliseconds(20) || displayRetryDelay > TimeSpan.FromMinutes(1)) throw new ArgumentOutOfRangeException(nameof(lcdRetryDelay));
+        this.stopWaitTimeout = stopWaitTimeout ?? TimeSpan.FromSeconds(12);
+        if (this.stopWaitTimeout <= TimeSpan.Zero || this.stopWaitTimeout > TimeSpan.FromSeconds(12)) throw new ArgumentOutOfRangeException(nameof(stopWaitTimeout));
     }
+    private readonly object lifecycleGate = new();
+    private long lifecycleVersion;
     private CancellationTokenSource? stop;
     private Task[] tasks = [];
+    private Task? stopCompletion;
+    private volatile bool powerPaused;
+    internal bool PowerPaused => powerPaused;
+    private readonly ConcurrentDictionary<string, string> cleanupFailures = new();
+    internal bool CleanupFailed => !cleanupFailures.IsEmpty;
+    private string cleanupStatus = "No cleanup requested";
+    internal string CleanupStatus => Volatile.Read(ref cleanupStatus);
     private Telemetry latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
     private ProcessActivity activity = ProcessActivity.Disabled;
     private IReadOnlyDictionary<string, LogExcerpt> excerpts = LogExcerpt.Empty;
@@ -60,7 +72,7 @@ internal sealed class Engine
     internal ConcurrentDictionary<string, int> FrameRenderCounts { get; } = new();
     internal static int SensorInterval(Settings settings) => settings.CoolingEnabled ? Math.Min(settings.PollSeconds, 2) : settings.PollSeconds;
     public string[] Logs => log.ToArray();
-    public bool Running => stop is not null;
+    public bool Running { get { lock (lifecycleGate) return stop is not null || stopCompletion is { IsCompleted: false }; } }
     public bool Cancelled => stop?.IsCancellationRequested == true;
     public bool Live { get; private set; }
     public static string[] Conflicts()
@@ -79,13 +91,29 @@ internal sealed class Engine
     }
     public void Start(Settings settings, bool live)
     {
-        if (Running) throw new InvalidOperationException("Stop the current session first.");
+        long requestedVersion;
+        lock (lifecycleGate)
+        {
+            if (Running) throw new InvalidOperationException("Stop the current session first.");
+            requestedVersion = lifecycleVersion;
+        }
         settings.Validate();
         if (live) settings.ValidateLiveSelection();
         if (live && settings.CoolingEnabled && testTelemetry is null && !StartupManager.Elevated)
             throw new InvalidOperationException("CPU sensor access on this PC requires administrator rights. Restart as administrator before enabling cooling.");
         if (live && settings.HasUsbSelection && conflicts().Length != 0) throw new InvalidOperationException("Close conflicting hardware-control applications: " + string.Join(", ", conflicts()));
-        var s = settings.Copy(); Volatile.Write(ref current, s); stop = new(); var token = stop.Token; Live = live; conflictingController = false; controllerFault = false;
+        var prepared = settings.Copy();
+        lock (lifecycleGate)
+        {
+            if (Running) throw new InvalidOperationException("Stop the current session first; its previous workers must finish before another session starts.");
+            if (requestedVersion != lifecycleVersion) throw new InvalidOperationException("Start was interrupted by a stop or Windows suspend request. Start explicitly again after the transition completes.");
+            StartSession(prepared, live);
+        }
+    }
+    private void StartSession(Settings s, bool live)
+    {
+        stopCompletion = null; powerPaused = false; cleanupFailures.Clear(); Volatile.Write(ref cleanupStatus, "No cleanup requested");
+        Volatile.Write(ref current, s); stop = new(); var token = stop.Token; Live = live; conflictingController = false; controllerFault = false;
         Status.Clear(); Fans.Clear(); FanCommands.Clear(); FrameRenderCounts.Clear();
         samplerDiagnostics.Reset(); Volatile.Write(ref lastControllerFault, null);
         latest = new(DateTimeOffset.MinValue, null, null, null, null, null);
@@ -145,22 +173,87 @@ internal sealed class Engine
     }
     public async Task Stop()
     {
-        if (stop is null) return;
-        stop.Cancel();
-        var all = Task.WhenAll(tasks);
-        if (await Task.WhenAny(all, Task.Delay(12000)) != all)
+        var completion = BeginStop(false);
+        // The deadline belongs to this caller, never to the ownership epoch.
+        // A timed-out waiter cannot discard still-running USB/sensor workers.
+        if (await Task.WhenAny(completion, Task.Delay(stopWaitTimeout)).ConfigureAwait(false) != completion)
             throw new TimeoutException("A hardware operation is still pending. Session is stopping; do not start another controller.");
-        try { await all; }
-        catch (OperationCanceledException) { }
-        catch (Exception e) { Note("Worker exited with error during stop: " + e.Message); }
-        stop.Dispose(); stop = null; tasks = []; Live = false;
-        FanCommands.Clear(); Fans.Clear();
-        activity = ProcessActivity.Disabled; processLog.Clear();
-        Volatile.Write(ref excerpts, LogExcerpt.Empty); Volatile.Write(ref merged, null);
-        Volatile.Write(ref latest, Latest with { Fans = [] });
-        foreach (var key in Status.Keys.Where(k => k.StartsWith("Port ", StringComparison.Ordinal))) Status[key] = "Released · no live command / feedback";
-        if (!controllerFault && Status.ContainsKey("Controller")) Status["Controller"] = "Released · no live controller feedback";
-        Status["Session"] = "Stopped"; Note("Stopped. Captured fan duties requested back, except a real critical-temperature override. Restoration is not BIOS hand-back or a guaranteed hardware watchdog.");
+        await completion.ConfigureAwait(false);
+    }
+    internal Task PauseForSystemSleep() => BeginStop(true);
+    internal void NotifySystemResume()
+    {
+        if (PowerPaused) Note(Running ? "Windows resumed; waiting for the previous session to release its hardware. Live remains paused."
+            : "Windows resumed; Live remains paused until explicitly started. " + CleanupStatus);
+    }
+    private Task BeginStop(bool forSystemSleep)
+    {
+        lock (lifecycleGate)
+        {
+            // Also invalidates a Start still validating outside this short lock.
+            lifecycleVersion++;
+            if (forSystemSleep && !powerPaused)
+            {
+                powerPaused = true;
+                Note("Windows suspend requested; pausing the session. No automatic Live restart after resume.");
+            }
+            if (stopCompletion is not null) return stopCompletion;
+            if (stop is null)
+            {
+                if (powerPaused) Status["Session"] = "Paused for Windows sleep · explicit Live start required";
+                return Task.CompletedTask;
+            }
+            var source = stop; var workers = tasks;
+            // CancelAsync flags the token before returning; callbacks cannot
+            // block the Windows power-notification handler.
+            var callbacks = source.CancelAsync();
+            Volatile.Write(ref cleanupStatus, "Pending · waiting for previous workers and hardware cleanup");
+            Status["Session"] = powerPaused ? "Pausing for Windows sleep · hardware release pending" : "Stopping · hardware release pending";
+            // No UI synchronization context is captured, including the prefix.
+            // This SAME task is shared by manual Stop, suspend and exit.
+            stopCompletion = Task.Run(() => CompleteStop(source, workers, callbacks));
+            return stopCompletion;
+        }
+    }
+    private async Task CompleteStop(CancellationTokenSource source, Task[] workers, Task callbacks)
+    {
+        try { await callbacks.ConfigureAwait(false); }
+        catch (Exception error) { RecordCleanupFailure("Cancellation callbacks", error); }
+        var all = Task.WhenAll(workers);
+        try { await all.ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!all.IsFaulted) { }
+        catch (Exception error)
+        {
+            RecordCleanupFailure("Worker completion", error);
+            Note("Worker exited with error during stop: " + error.Message);
+        }
+        lock (lifecycleGate)
+        {
+            // Start cannot enter a new epoch while this completion is pending.
+            source.Dispose(); tasks = []; Live = false;
+            FanCommands.Clear(); Fans.Clear();
+            activity = ProcessActivity.Disabled; processLog.Clear();
+            Volatile.Write(ref excerpts, LogExcerpt.Empty); Volatile.Write(ref merged, null);
+            Volatile.Write(ref latest, Latest with { Fans = [] });
+            if (!controllerFault && !CleanupFailed)
+            {
+                foreach (var key in Status.Keys.Where(k => k.StartsWith("Port ", StringComparison.Ordinal))) Status[key] = "Released · no live command / feedback";
+                if (Status.ContainsKey("Controller")) Status["Controller"] = "Released · no live controller feedback";
+            }
+            string result = CleanupFailed ? "Failed · " + string.Join("; ", cleanupFailures.OrderBy(x => x.Key).Select(x => x.Key + ": " + x.Value))
+                : "Completed · prior workers ended; release requests and close calls completed; hardware duty is not independently confirmed";
+            Volatile.Write(ref cleanupStatus, result); SetStatus("Cleanup", result);
+            Status["Session"] = powerPaused ? "Paused for Windows sleep · explicit Live start required" : "Stopped";
+            if (CleanupFailed) Status["Session"] += " · cleanup failed; verify hardware control";
+            Note((powerPaused ? "Paused for Windows sleep. " : "Stopped. ") + result + ". Restoration is not BIOS hand-back or a guaranteed hardware watchdog.");
+            stop = null;
+        }
+    }
+    private void RecordCleanupFailure(string owner, Exception error)
+    {
+        cleanupFailures.TryAdd(owner, error.Message);
+        Volatile.Write(ref cleanupStatus, "Failed · " + owner + ": " + error.Message);
+        SetStatus(owner + " cleanup", "ERROR · " + error.Message);
     }
     private void SensorLoop(bool live, CancellationToken token)
     {
@@ -365,10 +458,21 @@ internal sealed class Engine
                 catch (Exception e) { SetStatus(name, "ERROR · " + e.Message); }
                 finally
                 {
-                    try { lcd?.Dispose(); }
+                    try
+                    {
+                        if (lcd is not null)
+                        {
+                            SetStatus(name + " cleanup", "PENDING · closing the previous LCD transport");
+                            lcd.Dispose();
+                            SetStatus(name + " cleanup", "Completed · LCD transport close returned");
+                            if (token.IsCancellationRequested && Status.TryGetValue(name, out var lastStatus) && lastStatus.StartsWith("Connected", StringComparison.Ordinal))
+                                SetStatus(name, "Released · no live LCD transport");
+                        }
+                    }
                     catch (Exception error)
                     {
                         releaseFailed = true;
+                        RecordCleanupFailure(name, error);
                         SetStatus(name, "ERROR · close failed; retry blocked until Stop/review · " + error.Message);
                     }
                 }
@@ -389,6 +493,8 @@ internal sealed class Engine
             {
                 IFanController? controller = null;
                 bool controllerAttempted = false;
+                string? controllerFailureStatus = null;
+                string? controllerFailureReason = null;
                 try
                 {
                     while (true)
@@ -471,8 +577,9 @@ internal sealed class Engine
                             throw TelemetryFault("Stale telemetry · release software control; do not force full speed", freshnessSample, freshnessTime);
                         double controlTime = clock.Elapsed.TotalSeconds;
                         bool due = controlTime >= nextControl;
-                        // A critical sample takes priority between every bounded
-                        // HID transaction, including inside a slow feedback sweep.
+                        // A critical sample takes priority between HID calls,
+                        // including inside a slow feedback sweep. A native call
+                        // can outlast its nominal timeout while cancellation completes.
                         if (!due && !FanSafety.IsCritical(Latest, DateTimeOffset.UtcNow)) return;
                         double controlSeconds = due ? controlTime - previousControl : 0;
                         if (due)
@@ -566,6 +673,7 @@ internal sealed class Engine
                     var fault = ControllerFaultEvidence.FromException(e, () => Latest, () => SamplerDiagnostics);
                     Volatile.Write(ref lastControllerFault, fault);
                     controllerFault = true;
+                    controllerFailureReason = e.Message;
                     string cause = e.Message + $" · sample age {fault.SampleAgeSeconds:0.00} s; last read (previous completed iteration) {fault.LastReadMilliseconds:0} ms; sample gap (iteration starts) {fault.SampleGapMilliseconds:0} ms; active phase {fault.Sampler.Phase} {fault.Sampler.ActiveProvider} {fault.Sampler.ActiveDevice} {fault.Sampler.CurrentPhaseElapsedMilliseconds:0} ms";
                     if (testTelemetry is null)
                     {
@@ -576,11 +684,12 @@ internal sealed class Engine
                         }
                         catch (Exception diagnosticError) when (diagnosticError is IOException or UnauthorizedAccessException) { Note("Could not save controller fault: " + diagnosticError.GetType().Name); }
                     }
-                    SetStatus("Controller", controller is null
+                    controllerFailureStatus = controller is null
                         ? (controllerAttempted ? "FAULT LATCHED · connection attempt failed; ownership not established · " : "FAULT LATCHED · startup blocked before fan USB access · ") + cause
-                        : "FAULT LATCHED · " + cause + " · captured duties requested back; no forced full-speed fallback or automatic reconnect. Restore vendor control.");
+                        : "FAULT LATCHED · " + cause;
+                    SetStatus("Controller", controllerFailureStatus + (controller is null ? "" : " · release pending; no forced full-speed fallback or automatic reconnect. Restore vendor control."));
                     foreach (var p in monitored) SetStatus($"Port {p.Port}", controller is null
-                        ? "NOT STARTED · no software speed ownership established" : "PAUSED · controller fault: " + e.Message + " · captured duty requested; verify cooling");
+                        ? "NOT STARTED · no software speed ownership established" : "PAUSED · controller fault: " + e.Message + " · release pending; verify cooling");
                     Fans.Clear(); FanCommands.Clear();
                     break;
                 }
@@ -589,10 +698,39 @@ internal sealed class Engine
                     if (controller is not null)
                     {
                         var t = Latest;
-                        controller.PrepareToClose(FanSafety.IsCritical(t, DateTimeOffset.UtcNow));
+                        bool critical = FanSafety.IsCritical(t, DateTimeOffset.UtcNow);
+                        SetStatus("Controller cleanup", "PENDING · requesting " + (critical ? "critical-temperature duty" : "captured duties") + " and closing the controller");
+                        Exception? prepareFailure = null, closeFailure = null;
+                        try { controller.PrepareToClose(critical); }
+                        catch (Exception releaseError)
+                        {
+                            prepareFailure = releaseError; RecordCleanupFailure("Controller preparation", releaseError);
+                        }
+                        // Preparation failures must not skip the only close attempt.
                         try { controller.Dispose(); }
                         catch (Exception releaseError)
-                        { controllerFault = true; SetStatus("Controller", "FAULT · " + releaseError.Message); throw; }
+                        {
+                            closeFailure = releaseError; RecordCleanupFailure("Controller release", releaseError);
+                        }
+                        if (prepareFailure is not null || closeFailure is not null)
+                        {
+                            var failure = new IOException("Controller cleanup failed: " + string.Join("; ", new[] { prepareFailure?.Message, closeFailure?.Message }.Where(x => x is not null)), closeFailure ?? prepareFailure);
+                            // Keep the triggering fault, if any, alongside cleanup evidence.
+                            if (LastControllerFault is null) Volatile.Write(ref lastControllerFault, ControllerFaultEvidence.FromException(failure, () => Latest, () => SamplerDiagnostics));
+                            controllerFault = true;
+                            SetStatus("Controller cleanup", "ERROR · " + failure.Message);
+                            SetStatus("Controller", (controllerFailureStatus ?? "FAULT") + " · " + failure.Message + "; release unconfirmed; verify vendor control");
+                            foreach (var p in monitored) SetStatus($"Port {p.Port}", "PAUSED · controller fault: " + LastControllerFault!.Reason + " · controller cleanup failed; duty restoration unconfirmed");
+                            throw failure;
+                        }
+                        string released = critical ? "Critical-temperature duty requested; controller close returned"
+                            : "Captured duty restoration requested where owned; controller close returned; duty not independently confirmed";
+                        SetStatus("Controller cleanup", "Completed · " + released);
+                        if (controllerFailureStatus is not null)
+                        {
+                            SetStatus("Controller", controllerFailureStatus + " · " + released + "; no automatic reconnect. Verify vendor control.");
+                            foreach (var p in monitored) SetStatus($"Port {p.Port}", "PAUSED · controller fault: " + (LastControllerFault?.Reason ?? controllerFailureReason) + " · release/close requests completed; no live feedback");
+                        }
                     }
                 }
             }
@@ -639,7 +777,7 @@ internal sealed class Engine
         {
             Status[key] = value;
             // Log state transitions/errors, not continuously changing temperatures/duty.
-            if (value.StartsWith("ERROR") || value.StartsWith("FAULT") || key is "Controller" || key.Contains("panel") || key.Contains("AX")) Note(key + ": " + value);
+            if (value.StartsWith("ERROR") || value.StartsWith("FAULT") || key is "Controller" or "Cleanup" || key.EndsWith(" cleanup", StringComparison.Ordinal) || key.Contains("panel") || key.Contains("AX")) Note(key + ": " + value);
         }
     }
     private void Note(string message)

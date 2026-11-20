@@ -50,7 +50,7 @@ internal sealed partial class MainForm : Form
     private readonly FrameRenderer panelRenderer = new(), aioRenderer = new();
     private string? panelPreviewKey, aioPreviewKey;
     private DisplaySettings? panelPreviewSettings, aioPreviewSettings;
-    private readonly Button liveButton;
+    private readonly Button liveButton, previewButton;
     private ContextMenuStrip? startupMenu, profileMenu;
     private bool busy, exiting, smokeMode, loadingProfile, startMinimized, closeCompleted;
     private DateTime lastResource = DateTime.UtcNow;
@@ -87,7 +87,7 @@ internal sealed partial class MainForm : Form
         Controls.Add(shell);
         shell.Controls.Add(new Label { Text = "THERMALDESK  /  Temperatures, cooling and displays", ForeColor = Accent, Font = new Font(Font.FontFamily, 18, FontStyle.Bold), AutoSize = true, Padding = new Padding(0, 10, 0, 0) }, 0, 0);
         var tools = new BufferedFlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
-        tools.Controls.Add(Button("Preview", async () => await Switch(false)));
+        previewButton = Button("Preview", async () => await Switch(false)); tools.Controls.Add(previewButton);
         liveButton = Button("Start live control", async () => await Switch(true), true); tools.Controls.Add(liveButton);
         tools.Controls.Add(Button("Stop", async () => await Run(async () => await engine.Stop())));
         tools.Controls.Add(Button("Profile…", ProfileMenu));
@@ -429,6 +429,8 @@ internal sealed partial class MainForm : Form
     }
     private async Task Switch(bool live) => await Run(async () =>
     {
+        int powerGeneration = powerTransitionGeneration;
+        EnsureSessionSwitchAllowed(powerGeneration);
         var next = ReadSettings();
         if (live)
         {
@@ -442,9 +444,14 @@ internal sealed partial class MainForm : Form
             if (next.CoolingEnabled) warning += "\n\nCooling: you must have verified wiring and independent thermal protection. USB disconnection or a crashed/frozen process cannot guarantee a safe fan speed. Do not use experimental cooling unattended.";
             if (next.Panel.Content == DisplayContent.Screen || next.Aio.Content == DisplayContent.Screen) warning += "\n\nScreen mirroring can display private information on the physical LCD.";
             if (MessageBox.Show(warning, "Confirm live hardware access", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+            // A modal dialog pumps power messages. A pre-sleep confirmation
+            // cannot authorize a new session after the machine resumes.
+            EnsureSessionSwitchAllowed(powerGeneration);
             if (updating) { engine.ApplyLiveSettings(next); settings = next; return; }
         }
-        await engine.Stop(); settings = next; engine.Start(next, live);
+        await engine.Stop();
+        EnsureSessionSwitchAllowed(powerGeneration);
+        settings = next; engine.Start(next, live);
         if (live)
         {
             // First successful, explicitly confirmed Live start opts into resume.
@@ -493,10 +500,10 @@ internal sealed partial class MainForm : Form
     private void RefreshData()
     {
         var t = engine.Latest with { RenderTime = DateTimeOffset.Now };
-        bool stale = engine.Live && TelemetryFreshness.IsStale(t, t.PresentationTime);
+        bool stale = engine.PowerPaused || engine.CleanupFailed || engine.Live && TelemetryFreshness.IsStale(t, t.PresentationTime);
         if (processActivityStatus.Visible)
             SetText(processActivityStatus, "CPU: " + (t.TopCpuProcess?.Summary ?? "—") + "\nGPU: " + (t.TopGpuProcess?.Summary ?? "—") + (t.TopGpuProcess is { } top ? " · " + top.Engine : "") +
-                "\n" + t.ProcessMonitorStatus + "\n" + (!engine.Live ? "Preview: no process sampling. Enable in Settings, then use Live." : "Sample: " + (t.ProcessSampleTime == DateTimeOffset.MinValue ? "waiting" : t.ProcessSampleTime.LocalDateTime.ToString("HH:mm:ss"))));
+                "\n" + t.ProcessMonitorStatus + "\n" + (engine.PowerPaused ? "Paused after sleep: process sampling stopped." : !engine.Live ? "Preview: no process sampling. Enable in Settings, then use Live." : "Sample: " + (t.ProcessSampleTime == DateTimeOffset.MinValue ? "waiting" : t.ProcessSampleTime.LocalDateTime.ToString("HH:mm:ss"))));
         if (processActivityLog.Visible) UpdateReadOnlyText(processActivityLog, string.Join(Environment.NewLine, engine.ProcessLogs));
         static string Temp(double? x) => x.HasValue ? $"{x:0.0} °C" : "Unavailable";
         static string Load(double? x) => x.HasValue && double.IsFinite(x.Value) && x is >= 0 and <= 100 ? $"{x:0}% load" : "Load unavailable";
@@ -515,14 +522,17 @@ internal sealed partial class MainForm : Form
         if (engine.Running && engine.Live && settings.AllowMonitoringOnly && !settings.HasUsbSelection) sessionText = "MONITORING ONLY · real sensors/processes · no USB outputs selected";
         if (engine.Running && !engine.Live && settings.StartLiveAtSignIn && !settings.HasLiveSelection)
             sessionText = "PREVIEW · no live output selected · automatic Live is paused";
-        session.ForeColor = engine.ControllerFault || engine.Cancelled ? Color.FromArgb(255, 194, 100) : Accent;
-        SetText(liveButton, engine.ControllerFault && engine.Running ? "Blocked · Stop before retry" : engine.Running && engine.Live ? "Running · automatic" : settings.AllowMonitoringOnly && !settings.HasUsbSelection ? "Start monitoring" : "Start live control");
-        liveButton.Enabled = !engine.Running || !engine.Live;
+        session.ForeColor = engine.ControllerFault || engine.Cancelled || engine.PowerPaused || engine.CleanupFailed ? Color.FromArgb(255, 194, 100) : Accent;
+        UpdatePowerSessionButtons();
+        if (engine.PowerPaused || engine.CleanupFailed || PowerCleanupPending || powerPauseFailure.Length > 0) sessionText = PowerSessionMessage;
         if (engine.ControllerFault) sessionText = "CONTROLLER BLOCKED / FAULT · see log · verify vendor control";
+        if (engine.ControllerFault && (engine.PowerPaused || engine.CleanupFailed || PowerCleanupPending || powerPauseFailure.Length > 0)) sessionText += " · " + PowerSessionMessage;
         if (startupWarning.Length > 0) { sessionText += " · PROFILE RECOVERY"; session.ForeColor = Color.Orange; }
         SetText(profileStatus, applyHint.Length == 0 ? "Profile loaded · valid edits save automatically" : applyHint);
         profileStatus.ForeColor = applyFailed ? Color.FromArgb(255, 194, 100) : Muted;
-        string action = engine.ControllerFault && engine.Status.TryGetValue("Controller", out var controllerStatus) ? controllerStatus + " · Open diagnostics"
+        string action = engine.ControllerFault && engine.Status.TryGetValue("Controller", out var controllerStatus)
+            ? controllerStatus + (engine.CleanupFailed || powerPauseFailure.Length > 0 ? " · " + PowerSessionMessage : "") + " · Open diagnostics"
+            : engine.PowerPaused || engine.CleanupFailed || PowerCleanupPending || powerPauseFailure.Length > 0 ? PowerSessionMessage
             : startupWarning.Length > 0 ? startupWarning + " · Open diagnostics"
             : stale ? TelemetryFreshness.Status(t, t.PresentationTime) + " · Open diagnostics"
             : persistenceFailed ? "Profile is not saved. Check the path and available disk space · Open diagnostics"
@@ -566,6 +576,8 @@ internal sealed partial class MainForm : Form
     private static void SetText(Control control, string value) { if (control.Text != value) control.Text = value; }
     internal string? StartInitialSession()
     {
+        // Suspend can precede Shown. Startup preference is not a resume policy.
+        if (powerTransitionGeneration != 0 || systemSuspended || engine.PowerPaused) return null;
         try { engine.Start(settings, StartupRequested); return null; }
         catch (Exception error) when (error is InvalidOperationException or ArgumentException)
         {
@@ -608,14 +620,18 @@ internal sealed partial class MainForm : Form
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(AcceptanceStatusPath)!);
-            File.WriteAllText(AcceptanceStatusPath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.Running, engine.Live, engine.Cancelled, administrator = StartupManager.Elevated, telemetry = engine.Latest, sampler = engine.SamplerDiagnostics, controllerFault = engine.LastControllerFault, fans = engine.Fans.Values.OrderBy(x => x.Port), fanCommands = engine.FanCommands.Values.OrderBy(x => x.Port), status = engine.Status, log = engine.Logs.TakeLast(12) }, Settings.JsonOptions));
+            File.WriteAllText(AcceptanceStatusPath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.Running, engine.Live, engine.Cancelled, engine.PowerPaused, engine.CleanupFailed, engine.CleanupStatus, powerCleanupPending = PowerCleanupPending, administrator = StartupManager.Elevated, telemetry = engine.Latest, sampler = engine.SamplerDiagnostics, controllerFault = engine.LastControllerFault, fans = engine.Fans.Values.OrderBy(x => x.Port), fanCommands = engine.FanCommands.Values.OrderBy(x => x.Port), status = engine.Status, log = engine.Logs.TakeLast(12) }, Settings.JsonOptions));
         }
         catch (Exception error) { session.Text = "Acceptance status output failed: " + error.Message; }
     }
     private async Task RestartElevated() => await Run(async () =>
     {
+        int powerGeneration = powerTransitionGeneration;
+        EnsureSessionSwitchAllowed(powerGeneration);
         if (MessageBox.Show("Restart with administrator rights for CPU sensor access?\n\nThe current hardware session will stop first. The new window opens in Preview; confirm live control again. Windows may show a UAC prompt.", "Restart ThermalDesk", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        EnsureSessionSwitchAllowed(powerGeneration);
         var next = ReadSettings(); SettingsStore.Save(configPath, next); await engine.Stop();
+        EnsureSessionSwitchAllowed(powerGeneration);
         var launch = new ProcessStartInfo(Application.ExecutablePath) { UseShellExecute = true, Verb = "runas", Arguments = $"--preview --wait-for-process {Environment.ProcessId}" };
         using var child = Process.Start(launch) ?? throw new IOException("Elevated restart did not launch.");
         settings = next; exiting = true; BeginInvoke((Action)Close);
@@ -729,7 +745,7 @@ internal sealed partial class MainForm : Form
     {
         using var d = new SaveFileDialog { Filter = "JSON diagnostic report|*.json", FileName = "thermaldesk-diagnostics.json" };
         if (d.ShowDialog() != DialogResult.OK) return;
-        File.WriteAllText(d.FileName, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, devices = HidLink.Inventory(), session = engine.Status, telemetry = engine.Latest, sampler = engine.SamplerDiagnostics, controllerFault = engine.LastControllerFault, fans = engine.Fans, log = engine.Logs }, Settings.JsonOptions));
+        File.WriteAllText(d.FileName, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, engine.PowerPaused, engine.CleanupFailed, engine.CleanupStatus, powerCleanupPending = PowerCleanupPending, devices = HidLink.Inventory(), session = engine.Status, telemetry = engine.Latest, sampler = engine.SamplerDiagnostics, controllerFault = engine.LastControllerFault, fans = engine.Fans, log = engine.Logs }, Settings.JsonOptions));
     }
     private void HideToTray() { tray.Visible = true; refresh.Interval = 5000; Hide(); }
     private void RestoreFromTray() { refresh.Interval = 1000; Show(); WindowState = FormWindowState.Normal; Activate(); if (!busy) RefreshData(); }
@@ -748,7 +764,13 @@ internal sealed partial class MainForm : Form
         if (busy) return;
         if (settingsDelay.Enabled) ApplyPendingSettings();
         busy = true;
-        try { await engine.Stop(); exiting = closeCompleted = true; refresh.Stop(); settingsDelay.Stop(); tray.Visible = false; BeginInvoke((Action)Close); }
+        try
+        {
+            // An outstanding power cleanup owns the old handles until its
+            // workers really finish. Closing never disposes the UI underneath it.
+            if (PowerCleanupPending) await powerPauseTask!;
+            await engine.Stop(); exiting = closeCompleted = true; refresh.Stop(); settingsDelay.Stop(); tray.Visible = false; BeginInvoke((Action)Close);
+        }
         catch (Exception error) { exiting = false; RestoreFromTray(); Error(error); } finally { busy = false; }
     }
     public void RenderPreview(string path)

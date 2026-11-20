@@ -214,6 +214,13 @@ Diagnostic exports and optional acceptance status include the same sampler
 snapshot. A stale-data fault still requires Stop followed by Start live control;
 wait for Stop to finish before retrying.
 
+When Windows suspends, ThermalDesk requests a stop and gives hardware cleanup a
+short grace period. Unfinished operations stay owned by the original session;
+new Live or Preview sessions are blocked until they finish. After waking, control
+remains paused: verify the devices and choose **Start live control** explicitly.
+Cleanup failures remain visible. A completed restore request is not confirmed
+fan-duty readback or a hand-back to BIOS control.
+
 ## Troubleshooting
 
 - **CPU values missing:** check administrator access and supported PawnIO/LHM
@@ -226,6 +233,9 @@ wait for Stop to finish before retrying.
   in Live; fix the file/disk problem and choose **Profile… → Save now**.
 - **Automatic control blocked:** resolve the device/conflict in Overview and
   **Log + diagnostics**, then start Live. Recovery opens safely in Preview.
+- **Paused after Windows sleep:** wait for hardware cleanup to finish, verify
+  cooling, then start Live. Repeated USB initialization timeouts require checking
+  the affected device; increasing the telemetry freshness limit will not fix them.
 - **Need help:** export diagnostics and review before sharing. Names and local
   paths may be included; log-widget contents are excluded from telemetry exports.
 
